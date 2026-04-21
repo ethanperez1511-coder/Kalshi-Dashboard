@@ -5,6 +5,7 @@ from src.models.opportunity import Opportunity
 from src.models.settings import TradingSettings
 from src.models.position import Position
 from src.models.trade import Trade
+from src.backtest.models import BacktestRun, BacktestTrade
 
 __all__ = [
     "Market",
@@ -14,4 +15,6 @@ __all__ = [
     "TradingSettings",
     "Position",
     "Trade",
+    "BacktestRun",
+    "BacktestTrade",
 ]
