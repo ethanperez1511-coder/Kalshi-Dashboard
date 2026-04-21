@@ -8,6 +8,7 @@ from src.config import Settings
 from src.database import get_engine, Base
 from src.api.markets import create_markets_router
 from src.api.portfolio import create_portfolio_router
+from src.api.backtest import create_backtest_router
 from src.demo.seed import seed_demo_data
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -21,6 +22,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Kalshi Trading Dashboard", version="0.1.0")
     app.include_router(create_markets_router(engine))
     app.include_router(create_portfolio_router(engine))
+    app.include_router(create_backtest_router(engine))
 
     @app.on_event("startup")
     async def startup():
