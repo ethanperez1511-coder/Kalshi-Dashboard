@@ -15,6 +15,9 @@ def load_private_key(pem_path: str) -> rsa.RSAPrivateKey:
 
 
 def load_private_key_from_string(pem_content: str) -> rsa.RSAPrivateKey:
+    # Cloud env vars (Railway, Render, etc.) often store multiline values with
+    # literal \n instead of real newlines — decode both forms.
+    pem_content = pem_content.replace("\\n", "\n")
     return _parse_pem(pem_content.encode())
 
 
