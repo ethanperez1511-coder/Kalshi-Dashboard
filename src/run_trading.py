@@ -81,6 +81,13 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     # Step 1: Score all markets
     logger.info("=== Scoring markets ===")
     results = score_all_markets(engine)
+
+    # Alert once if the sports odds feed has gone dark (quota/key) — otherwise
+    # SportsOddsModel silently produces nothing and only Polymarket carries.
+    from src.modeling import odds_api
+    if odds_api.QUOTA_DEAD and not getattr(run_pipeline, "_quota_alerted", False):
+        alerter.send("⚠️ Odds API quota dead — sports model dormant, Polymarket still active.")
+        run_pipeline._quota_alerted = True
     qualifying = [r for r in results if r["status"] == "qualifying"]
     watching = [r for r in results if r["status"] == "watching"]
     rejected = [r for r in results if r["status"] == "rejected"]

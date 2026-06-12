@@ -17,6 +17,9 @@ from src.trading_config import (
     PRICE_DERIVED_MIN_EDGE,
     MAX_SPREAD_CENTS,
     MAX_SNAPSHOT_AGE_MINUTES,
+    MAX_DAYS_TO_EXPIRY,
+    ODDS_CACHE_TTL_MINUTES,
+    ODDS_SPORT_KEYS,
 )
 from src.models.market import Market
 from src.models.opportunity import Opportunity
@@ -34,9 +37,20 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
     5. Return a list of result dicts.
     """
     settings = Settings()
-    odds_client = OddsClient(settings.ODDS_API_KEY) if settings.ODDS_API_KEY else None
+    odds_client = (
+        OddsClient(
+            settings.ODDS_API_KEY,
+            sport_keys=[s.strip() for s in ODDS_SPORT_KEYS.split(",") if s.strip()],
+            ttl_seconds=ODDS_CACHE_TTL_MINUTES * 60,
+        )
+        if settings.ODDS_API_KEY
+        else None
+    )
     registry = ModelRegistry(odds_client=odds_client)
-    trade_filter = TradeFilter(max_spread_cents=MAX_SPREAD_CENTS)
+    trade_filter = TradeFilter(
+        max_spread_cents=MAX_SPREAD_CENTS,
+        max_hours_to_expiry=MAX_DAYS_TO_EXPIRY * 24,
+    )
 
     # --- Step 1: load open markets as plain dicts ---
     with get_session(engine) as session:

@@ -19,6 +19,7 @@ from src.modeling.polymarket_api import PolyMarket, PolymarketClient
 from src.trading_config import (
     POLYMARKET_MIN_SIMILARITY,
     POLYMARKET_MIN_VOLUME_USD,
+    POLYMARKET_SCAN_LIMIT,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,7 @@ class PolymarketModel(BaseModel):
     }
 
     def __init__(self, poly_client: Optional[PolymarketClient] = None):
-        self._client = poly_client or PolymarketClient()
+        self._client = poly_client or PolymarketClient(max_markets=POLYMARKET_SCAN_LIMIT)
 
     @property
     def category(self) -> str:

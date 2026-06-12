@@ -9,7 +9,12 @@ from src.models.trade import Trade
 from src.models.position import Position
 from src.models.settings import TradingSettings
 from src.risk.manager import TradeDecision
-from src.trading_config import ORDER_TYPE, REQUOTE_SECONDS, PAPER_CONSERVATIVE_FILLS
+from src.trading_config import (
+    ORDER_TYPE,
+    REQUOTE_SECONDS,
+    PAPER_CONSERVATIVE_FILLS,
+    SKIP_HELD_MARKETS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +67,15 @@ class TradeEngine:
         self._engine = engine
         self._client = kalshi_client
         self._fill_timeout = DEFAULT_FILL_TIMEOUT
+
+    def _has_open_position(self, market_id: str) -> bool:
+        with get_session(self._engine) as session:
+            return (
+                session.query(Position)
+                .filter_by(market_id=market_id, status="open")
+                .first()
+                is not None
+            )
 
     def _get_mode(self) -> dict:
         with get_session(self._engine) as session:
@@ -125,6 +139,12 @@ class TradeEngine:
     ) -> Optional[Dict[str, Any]]:
         if not decision.approved:
             logger.info(f"Trade rejected for {market_id}: {decision.rejection_reasons}")
+            return None
+
+        # Skip markets we already hold: re-entering every cycle concentrates risk
+        # and burns the paper-trade evaluation on a handful of markets.
+        if SKIP_HELD_MARKETS and self._has_open_position(market_id):
+            logger.info(f"Skipping {market_id}: position already open")
             return None
 
         mode_info = self._get_mode()

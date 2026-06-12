@@ -145,3 +145,43 @@ Coverage: events feed ingest brings true-category Elections/Politics/Economics m
 PolymarketModel: independent cross-platform price signal; conservative matching (similarity
 threshold + exact number match + ambiguity margin 0.25 + $25k volume floor); fails safe.
 Suite: 226 passed (19 new). First live cycle verified end-to-end.
+
+---
+
+# Volume + accuracy + cost improvements (2026-06-12, session 3)
+
+## Context
+- Odds API free quota (500/mo) exhausted in ~2 days: every 5-min cycle fetched 8 sports.
+  SportsOddsModel has been loading 0 games for hours — silent failure, no alert.
+- Two pipelines were running (local Mac + Railway) burning the same quota. Local killed.
+- Paper PnL ignores Kalshi trading fees → overstates profitability → risk of going live on
+  fake numbers. This is a decision-accuracy bug, not just optimism.
+- Bot re-buys the same market every cycle (3× in 3 cycles) — concentrates risk, wastes the
+  50-trade evaluation on a handful of markets.
+
+## Safety statement (per CLAUDE.md)
+- Fee-accurate PnL makes paper results MORE conservative — never loosens anything.
+- Expiry filter, dedup, and odds caching only REDUCE or reshape the qualifying set.
+- Polymarket scan widening adds independent-data coverage; same EV filter + risk limits apply.
+- No change to mode, paper_trading_mode default, risk limits (quarter-Kelly, 3%/trade,
+  25% exposure, 20% breaker), or live gate. No DB schema changes.
+
+## Tasks
+- [x] 1. Kill local pipeline (done — Railway is sole system of record).
+- [x] 2. Odds API: cache across cycles (TTL) + only in-season sports + alert on quota dead.
+- [x] 3. Fee-accurate paper settlement PnL (Kalshi ~7%·p·(1-p) per contract, applied at settle).
+- [x] 4. Per-market dedup: skip a market already held (or capped adds/day).
+- [x] 5. Max days-to-expiry filter (default 14d) — recycle capital fast.
+- [x] 6. Polymarket scan 1000 → 3000 markets (free, unlimited).
+- [x] TDD: failing tests first for fee math, dedup, expiry filter.
+- [x] Full suite green (241 passed); push to Railway; verify cycle log + Telegram.
+
+## Review (session 3)
+241 tests pass (15 new in test_velocity_and_fees.py; 6 settlement/tracker tests updated to
+expect net-of-fee PnL). Changes: (1) local pipeline killed — Railway sole system of record;
+(2) Odds API cross-cycle TTL cache + in-season sport list + quota-dead Telegram alert;
+(3) fee-accurate paper settlement (kalshi_fee, paper only — live already pays on Kalshi);
+(4) skip already-held markets (no risk concentration / wasted paper count);
+(5) 14-day max-expiry filter for fast capital recycling; (6) Polymarket scan 1000→3000.
+All changes tighten the trade set or make paper PnL more conservative. Risk limits, mode
+default, and live gate untouched.

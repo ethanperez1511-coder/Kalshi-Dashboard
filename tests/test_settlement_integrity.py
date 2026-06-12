@@ -53,47 +53,51 @@ def test_yes_cost_basis_unchanged(db_engine):
 
 # --- realized PnL on settlement ---
 
+# Positions with no Trade row default to paper, so settlement subtracts the
+# simulated Kalshi entry fee (kalshi_fee). Expected values are net of that fee.
+
 def test_no_position_win_pnl(db_engine):
-    # NO at 94¢, market resolves NO (yes settles 0): profit = 6¢ x 3 = $0.18
+    # NO at 94¢ resolves NO: gross 6¢ x 3 = $0.18, fee $0.02 -> $0.16
     Base.metadata.create_all(db_engine)
     with get_session(db_engine) as session:
         _mk_position(session, "no", entry=94, qty=3)
         session.commit()
     closed = PortfolioTracker(db_engine).close_position("MKT-1", exit_price=0)
     assert closed is not None
-    assert abs(closed["realized_pnl"] - 0.18) < 1e-9
+    assert abs(closed["realized_pnl"] - 0.16) < 1e-9
 
 
 def test_no_position_loss_pnl(db_engine):
-    # NO at 94¢, market resolves YES (yes settles 100): lose stake = -$2.82
+    # NO at 94¢ resolves YES: gross -$2.82, fee $0.02 -> -$2.84
     Base.metadata.create_all(db_engine)
     with get_session(db_engine) as session:
         _mk_position(session, "no", entry=94, qty=3)
         session.commit()
     closed = PortfolioTracker(db_engine).close_position("MKT-1", exit_price=100)
     assert closed is not None
-    assert abs(closed["realized_pnl"] - (-2.82)) < 1e-9
+    assert abs(closed["realized_pnl"] - (-2.84)) < 1e-9
 
 
 def test_yes_position_win_pnl(db_engine):
-    # YES at 40¢ resolving YES: profit = 60¢ x 5 = $3.00
+    # YES at 40¢ resolves YES: gross 60¢ x 5 = $3.00, fee $0.09 -> $2.91
     Base.metadata.create_all(db_engine)
     with get_session(db_engine) as session:
         _mk_position(session, "yes", entry=40, qty=5)
         session.commit()
     closed = PortfolioTracker(db_engine).close_position("MKT-1", exit_price=100)
     assert closed is not None
-    assert abs(closed["realized_pnl"] - 3.00) < 1e-9
+    assert abs(closed["realized_pnl"] - 2.91) < 1e-9
 
 
 def test_yes_position_loss_pnl(db_engine):
+    # YES at 40¢ resolves NO: gross -$2.00, fee $0.09 -> -$2.09
     Base.metadata.create_all(db_engine)
     with get_session(db_engine) as session:
         _mk_position(session, "yes", entry=40, qty=5)
         session.commit()
     closed = PortfolioTracker(db_engine).close_position("MKT-1", exit_price=0)
     assert closed is not None
-    assert abs(closed["realized_pnl"] - (-2.00)) < 1e-9
+    assert abs(closed["realized_pnl"] - (-2.09)) < 1e-9
 
 
 # --- unrealized PnL uses side-cost convention for both sides ---

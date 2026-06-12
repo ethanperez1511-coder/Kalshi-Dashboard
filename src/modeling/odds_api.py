@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -11,7 +12,8 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://api.the-odds-api.com/v4"
 
-# Sports keys for major US leagues
+# Default sports keys for major US leagues. The free quota is tiny (500/mo), so
+# the pipeline passes only in-season leagues via TRADING_ODDS_SPORT_KEYS.
 SPORT_KEYS = [
     "basketball_nba",
     "baseball_mlb",
@@ -22,6 +24,21 @@ SPORT_KEYS = [
     "tennis_atp_french_open",
     "tennis_wta_french_open",
 ]
+
+# Module-level cache shared across OddsClient instances (a fresh client is built
+# every pipeline cycle). Without this, every cycle re-burns the monthly quota.
+# Maps cache-key -> (fetched_at_monotonic, [GameOdds]).
+_MODULE_CACHE: Dict[str, tuple] = {}
+_CACHE_TTL_SECONDS = 3600  # overridden per-client below
+
+
+def _clear_module_cache() -> None:
+    _MODULE_CACHE.clear()
+
+
+# Flips True the moment any client sees a quota/auth failure. The pipeline reads
+# it once per cycle to alert that the sports model has gone dark.
+QUOTA_DEAD = False
 
 
 @dataclass
@@ -89,29 +106,54 @@ def devig_book_then_average(
 
 
 class OddsClient:
-    def __init__(self, api_key: str):
+    def __init__(
+        self,
+        api_key: str,
+        sport_keys: Optional[List[str]] = None,
+        ttl_seconds: int = _CACHE_TTL_SECONDS,
+        http=httpx,
+    ):
         self._api_key = api_key
-        self._cache: Dict[str, List[GameOdds]] = {}
+        self._sport_keys = sport_keys if sport_keys is not None else SPORT_KEYS
+        self._ttl = ttl_seconds
+        self._http = http
+        # True once a 401/quota response is seen — lets the pipeline alert that
+        # the sports model has gone dark instead of failing silently.
+        self.quota_dead = False
+
+    def _cache_key(self) -> str:
+        return f"{self._api_key}|{','.join(sorted(self._sport_keys))}"
 
     def get_all_odds(self) -> List[GameOdds]:
-        """Fetch odds for all tracked sports. Caches results."""
-        if self._cache:
-            return [g for games in self._cache.values() for g in games]
+        """Fetch odds for the configured sports, served from a TTL cache.
+
+        The cache spans client instances so consecutive pipeline cycles don't
+        each spend the monthly quota.
+        """
+        key = self._cache_key()
+        cached = _MODULE_CACHE.get(key)
+        if cached is not None:
+            fetched_at, games = cached
+            if (time.monotonic() - fetched_at) < self._ttl:
+                return games
 
         all_games: List[GameOdds] = []
-        for sport_key in SPORT_KEYS:
-            games = self._fetch_sport(sport_key)
-            self._cache[sport_key] = games
-            all_games.extend(games)
+        for sport_key in self._sport_keys:
+            all_games.extend(self._fetch_sport(sport_key))
+
+        # Only cache a successful fetch — caching an empty quota-dead result
+        # would hide recovery when the quota resets.
+        if not self.quota_dead:
+            _MODULE_CACHE[key] = (time.monotonic(), all_games)
         return all_games
 
     def clear_cache(self):
-        self._cache.clear()
+        _MODULE_CACHE.pop(self._cache_key(), None)
 
     def _fetch_sport(self, sport_key: str) -> List[GameOdds]:
         """Fetch moneyline + totals + spreads for a sport."""
         try:
-            resp = httpx.get(
+            resp = self._http.get(
                 f"{_BASE_URL}/sports/{sport_key}/odds",
                 params={
                     "apiKey": self._api_key,
@@ -121,8 +163,11 @@ class OddsClient:
                 },
                 timeout=15.0,
             )
-            if resp.status_code == 401:
-                logger.warning("Odds API: invalid API key")
+            if resp.status_code in (401, 429):
+                logger.warning(f"Odds API: quota exhausted or invalid key ({resp.status_code})")
+                self.quota_dead = True
+                global QUOTA_DEAD
+                QUOTA_DEAD = True
                 return []
             if resp.status_code == 422:
                 logger.debug(f"Odds API: sport {sport_key} not available")

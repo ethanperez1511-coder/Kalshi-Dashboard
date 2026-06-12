@@ -8,6 +8,7 @@ from src.models.market import Market
 from src.models.position import Position
 from src.models.trade import Trade
 from src.models.settings import TradingSettings
+from src.trading.fees import kalshi_fee
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ class PortfolioTracker:
             # Convert YES-scale settlement to this side's terms, then one formula.
             pos_side = pos.side
             side_exit = exit_price if pos_side == "yes" else 100 - exit_price
-            realized_pnl = (side_exit - pos.entry_price) * pos.quantity / 100.0
+            gross_pnl = (side_exit - pos.entry_price) * pos.quantity / 100.0
 
             # Close the position
             pos.status = "closed"
@@ -57,6 +58,14 @@ class PortfolioTracker:
                 .order_by(Trade.created_at.desc())
                 .first()
             )
+
+            # Paper fills pay no real fee, so simulate Kalshi's entry fee here to
+            # keep paper PnL honest. Live fills already paid it on Kalshi — never
+            # double-charge them.
+            is_paper = trade.is_paper if trade is not None else True
+            fee = kalshi_fee(pos.quantity, pos.entry_price) if is_paper else 0.0
+            realized_pnl = round(gross_pnl - fee, 4)
+
             if trade:
                 trade.status = "closed"
                 trade.exit_price = side_exit  # same side-cost terms as trade.price
@@ -79,6 +88,7 @@ class PortfolioTracker:
                 "market_id": market_id,
                 "exit_price": side_exit,
                 "realized_pnl": realized_pnl,
+                "fee": fee,
                 "status": "closed",
             }
 

@@ -65,6 +65,37 @@ YES_LONGSHOT_MAX_PRICE_CENTS: int = _env_int("TRADING_YES_LONGSHOT_MAX_PRICE_CEN
 # by a single esports-parlay series; a higher cap reaches more series.
 MARKET_FETCH_CAP: int = _env_int("TRADING_MARKET_FETCH_CAP", 3000)
 
+# --- Velocity: max days to expiry ---
+# Skip markets resolving further out than this. Capital locked in a months-out
+# market can't be recycled; fast-resolving markets turn the bankroll over many
+# more times for the same dollars. 0 disables the filter.
+MAX_DAYS_TO_EXPIRY: int = _env_int("TRADING_MAX_DAYS_TO_EXPIRY", 14)
+
+# --- Velocity: skip already-held markets ---
+# Don't re-enter a market we already hold an open position in. Prevents the
+# pipeline from buying the same market every cycle (risk concentration + wasted
+# paper-trade count).
+SKIP_HELD_MARKETS: bool = _env_bool("TRADING_SKIP_HELD_MARKETS", True)
+
+# --- Cost: Kalshi trading fee (paper settlement realism) ---
+# Kalshi charges ceil(rate * contracts * P * (1-P)) per fill. Paper settlement
+# subtracts this so paper PnL matches what live would actually net.
+KALSHI_FEE_RATE: float = _env_float("TRADING_KALSHI_FEE_RATE", 0.07)
+
+# --- Cost: Odds API quota conservation ---
+# A new OddsClient is built each cycle; without a cross-cycle cache every cycle
+# re-burns the free monthly quota. TTL caps refresh frequency; the sport list
+# trims to in-season leagues. Comma-separated env override.
+ODDS_CACHE_TTL_MINUTES: int = _env_int("TRADING_ODDS_CACHE_TTL_MINUTES", 60)
+ODDS_SPORT_KEYS: str = _env_str(
+    "TRADING_ODDS_SPORT_KEYS",
+    "baseball_mlb,basketball_nba,icehockey_nhl",
+)
+
+# --- Coverage: Polymarket scan depth ---
+# Polymarket's public API is free and unlimited — scan deeper for more matches.
+POLYMARKET_SCAN_LIMIT: int = _env_int("TRADING_POLYMARKET_SCAN_LIMIT", 3000)
+
 # --- Coverage: event-category ingest ---
 # The raw /markets feed is parlay-dominated; the events feed is the only way
 # to reach Elections/Politics/Economics markets with their true category.

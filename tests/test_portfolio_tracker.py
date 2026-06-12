@@ -59,7 +59,7 @@ def test_close_updates_bankroll(db_engine):
     tracker.close_position(market_id="MKT-1", exit_price=100)
     with get_session(db_engine) as session:
         settings = session.query(TradingSettings).first()
-        assert settings.bankroll == 101.20
+        assert settings.bankroll == 101.14  # 101.20 gross - 0.06 fee
 
 
 def test_close_updates_peak_bankroll(db_engine):
@@ -68,7 +68,7 @@ def test_close_updates_peak_bankroll(db_engine):
     tracker.close_position(market_id="MKT-1", exit_price=100)
     with get_session(db_engine) as session:
         settings = session.query(TradingSettings).first()
-        assert settings.peak_bankroll == 101.20
+        assert settings.peak_bankroll == 101.14  # 101.20 gross - 0.06 fee
 
 
 def test_close_nonexistent_returns_none(db_engine):

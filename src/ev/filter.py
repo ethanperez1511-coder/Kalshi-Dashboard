@@ -48,6 +48,7 @@ class TradeFilter:
         max_disagreement: float = MAX_MODEL_DISAGREEMENT,
         skip_yes_longshots: bool = SKIP_YES_LONGSHOTS,
         yes_longshot_max_price_cents: int = YES_LONGSHOT_MAX_PRICE_CENTS,
+        max_hours_to_expiry: float = 0.0,
     ) -> None:
         self.min_daily_volume = min_daily_volume
         self.max_spread_cents = max_spread_cents
@@ -55,6 +56,8 @@ class TradeFilter:
         self.max_disagreement = max_disagreement
         self.skip_yes_longshots = skip_yes_longshots
         self.yes_longshot_max_price_cents = yes_longshot_max_price_cents
+        # 0 disables the far-expiry cap.
+        self.max_hours_to_expiry = max_hours_to_expiry
 
     def _get_edge_threshold(self, confidence: float) -> float:
         """Return the minimum required edge based on model confidence.
@@ -134,6 +137,13 @@ class TradeFilter:
         if hours_to_expiry < self.min_hours_to_expiry:
             rejection_reasons.append(
                 f"Too close to expiry: {hours_to_expiry:.2f}h < {self.min_hours_to_expiry:.2f}h"
+            )
+
+        # 5b. Far-expiry cap: capital locked in a months-out market can't be
+        # recycled. 0 disables.
+        if self.max_hours_to_expiry > 0 and hours_to_expiry > self.max_hours_to_expiry:
+            rejection_reasons.append(
+                f"Expiry too far out: {hours_to_expiry:.0f}h > {self.max_hours_to_expiry:.0f}h"
             )
 
         # 6. Disagreement cap: |p_model - market| beyond this means bad data, not edge.
