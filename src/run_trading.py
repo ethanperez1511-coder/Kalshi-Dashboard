@@ -8,6 +8,7 @@ import logging
 import signal
 import time
 
+from src.alerts import Alerter
 from src.config import Settings
 from src.database import get_engine, Base
 from src.demo.seed import seed_demo_data
@@ -36,7 +37,8 @@ def _handle_signal(signum, frame):
     _shutdown = True
 
 
-def run_pipeline():
+def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
+    alerter = alerter or Alerter()
     settings = Settings()
     engine = get_engine(settings.DATABASE_URL)
     Base.metadata.create_all(engine)
@@ -67,6 +69,8 @@ def run_pipeline():
         # Refresh bankroll after settlement
         ts = TradingSettings.get_or_create(engine)
         logger.info(f"Bankroll after settlement: ${ts.bankroll:.2f}")
+        for s in settled:
+            alerter.settled(s["market_id"], s["realized_pnl"], ts.bankroll)
 
     # Live mode only: bankroll mirrors the real Kalshi cash balance.
     # In paper mode the bankroll is virtual and must never be overwritten.
@@ -147,6 +151,10 @@ def run_pipeline():
                 f"{result['side'].upper()} ×{result['quantity']} @ {result['price']}¢ "
                 f"(${result['dollars']:.2f})"
             )
+            alerter.trade(
+                result["market_id"], result["side"], result["quantity"],
+                result["price"], result["dollars"], result.get("is_paper", True),
+            )
 
     # Summary
     logger.info("=== Portfolio Summary ===")
@@ -156,6 +164,13 @@ def run_pipeline():
 
     logger.info(f"Trades placed this run: {trades_placed}")
     logger.info(f"Bankroll: ${summary['bankroll']:.2f}")
+
+    # Milestone alerts
+    paper_count = ts.paper_trade_count
+    if paper_count in (10, 25, 40, 50) or paper_count % 10 == 0:
+        alerter.milestone(paper_count, ts.paper_trades_before_live)
+    if paper_count >= ts.paper_trades_before_live:
+        alerter.live_gate_reached()
     logger.info(f"Open positions: {summary['open_position_count']}")
     logger.info(f"Total exposure: ${summary['total_exposure']:.2f}")
     logger.info(f"Unrealized PnL: ${summary['unrealized_pnl']:.2f}")
@@ -173,14 +188,16 @@ def run_loop(interval: int = 300):
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    alerter = Alerter()
     cycle = 0
     while not _shutdown:
         cycle += 1
         logger.info(f"=== Cycle {cycle} ===")
         try:
-            run_pipeline()
-        except Exception:
+            run_pipeline(alerter=alerter, cycle=cycle)
+        except Exception as exc:
             logger.exception("Pipeline error — will retry next cycle")
+            alerter.error(str(exc))
 
         if _shutdown:
             break

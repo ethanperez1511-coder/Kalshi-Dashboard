@@ -2,6 +2,8 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    TELEGRAM_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""
     KALSHI_API_KEY: str = ""
     KALSHI_API_SECRET: str = ""
     KALSHI_PRIVATE_KEY_PATH: str = ""
