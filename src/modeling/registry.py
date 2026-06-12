@@ -5,7 +5,10 @@ from typing import List
 from src.modeling.base import BaseModel
 from src.modeling.models.consensus import ConsensusModel
 from src.modeling.models.finance import FinanceModel
+from src.modeling.models.polymarket import PolymarketModel
 from src.modeling.models.sports import SportsModel
+from src.modeling.models.sports_odds import SportsOddsModel
+from src.modeling.odds_api import OddsClient
 
 
 class ModelRegistry:
@@ -15,9 +18,14 @@ class ModelRegistry:
     every market has at least one estimate.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, odds_client: OddsClient | None = None) -> None:
         self._fallback: BaseModel = ConsensusModel()
-        self._specialized: List[BaseModel] = [FinanceModel(), SportsModel()]
+        self._specialized: List[BaseModel] = [
+            SportsOddsModel(odds_client),  # external odds first
+            PolymarketModel(),
+            FinanceModel(),
+            SportsModel(),
+        ]
 
     @property
     def all_models(self) -> List[BaseModel]:
@@ -30,5 +38,5 @@ class ModelRegistry:
         If no specialized model matches the category, only the fallback is
         returned.
         """
-        matching = [m for m in self._specialized if m.category == category]
+        matching = [m for m in self._specialized if m.matches(category)]
         return matching + [self._fallback]

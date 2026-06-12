@@ -20,11 +20,28 @@ class ModelResult:
         self.confidence = max(0.0, min(1.0, self.confidence))
 
 
+# Model type tags for edge quality separation
+MODEL_TYPE_INDEPENDENT = "INDEPENDENT"      # Has external data (real edge)
+MODEL_TYPE_PRICE_DERIVED = "PRICE_DERIVED"  # Anchored to market price
+
+
 class BaseModel(ABC):
     @property
     @abstractmethod
     def category(self) -> str:
         ...
+
+    @property
+    def model_type(self) -> str:
+        """Override in subclass. Default is PRICE_DERIVED."""
+        return MODEL_TYPE_PRICE_DERIVED
+
+    def matches(self, category: str) -> bool:
+        """Whether this model covers *category*. Default: exact match.
+
+        Models spanning several categories override this.
+        """
+        return category == self.category
 
     @abstractmethod
     def estimate(

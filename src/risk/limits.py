@@ -2,12 +2,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import List
+from typing import Dict, List, Optional
 from sqlalchemy import Engine
 from src.database import get_session
 from src.models.position import Position
 from src.models.trade import Trade
 from src.models.settings import TradingSettings
+from src.trading_config import MAX_CLUSTER_EXPOSURE
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,20 @@ logger = logging.getLogger(__name__)
 class LimitsResult:
     approved: bool
     violations: List[str] = field(default_factory=list)
+
+
+def _extract_cluster_key(market_id: str) -> str:
+    """Extract a cluster key from a Kalshi market ID.
+
+    For MVE tickers like KXMVESPORTSMULTIGAMEEXTENDED-S2026XXXX-YYYY,
+    the middle segment (S2026XXXX) represents the event/collection,
+    which groups correlated legs. We use this as the cluster key.
+    For non-MVE tickers, fall back to the full market_id.
+    """
+    parts = market_id.split("-")
+    if len(parts) >= 2:
+        return parts[1]  # The event/collection ID
+    return market_id
 
 
 class LimitsChecker:
@@ -99,7 +114,47 @@ class LimitsChecker:
                     f"{settings['drawdown_circuit_breaker_pct']:.0%} — system stopped"
                 )
 
+        # 5. Correlation-aware cluster exposure
+        cluster_violation = self._check_cluster_exposure(
+            trade_dollars, market_id, bankroll,
+        )
+        if cluster_violation:
+            violations.append(cluster_violation)
+
         return LimitsResult(
             approved=len(violations) == 0,
             violations=violations,
         )
+
+    def _check_cluster_exposure(
+        self, trade_dollars: float, market_id: str, bankroll: float,
+    ) -> Optional[str]:
+        """Cap exposure per correlated cluster.
+
+        Clusters are defined by:
+        - game_id: positions sharing the same game event (extracted from market_id)
+        - (league, date): positions in the same league on the same day
+        """
+        max_cluster = bankroll * MAX_CLUSTER_EXPOSURE
+
+        with get_session(self._engine) as session:
+            positions = session.query(Position).filter_by(status="open").all()
+            # Read values inside session to avoid DetachedInstanceError
+            pos_data = [(p.market_id, p.cost_basis) for p in positions]
+
+        new_cluster = _extract_cluster_key(market_id)
+
+        cluster_exposure: Dict[str, float] = {}
+        for mid, cost in pos_data:
+            key = _extract_cluster_key(mid)
+            cluster_exposure[key] = cluster_exposure.get(key, 0) + cost
+
+        # Check if adding this trade exceeds cluster cap
+        current = cluster_exposure.get(new_cluster, 0)
+        if current + trade_dollars > max_cluster:
+            return (
+                f"Cluster exposure ${current + trade_dollars:.2f} exceeds "
+                f"max ${max_cluster:.2f} ({MAX_CLUSTER_EXPOSURE:.0%} of bankroll) "
+                f"for cluster {new_cluster}"
+            )
+        return None

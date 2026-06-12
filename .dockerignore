@@ -1,0 +1,11 @@
+.env
+*.pem
+*.key
+*.db
+__pycache__
+*.egg-info
+.git
+.superpowers/
+docs/
+tests/
+frontend/

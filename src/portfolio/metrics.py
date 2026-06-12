@@ -4,6 +4,7 @@ from sqlalchemy import Engine
 from src.database import get_session
 from src.models.trade import Trade
 from src.models.settings import TradingSettings
+from src.trading_config import MIN_SETTLED_TRADES
 
 
 def compute_metrics(engine: Engine) -> Dict[str, Any]:
@@ -40,6 +41,8 @@ def compute_metrics(engine: Engine) -> Dict[str, Any]:
         actual_win_rate = len(wins) / len(trades)
         calibration_error = abs(avg_p_model - actual_win_rate)
 
+        calibration_reliable = len(trades) >= MIN_SETTLED_TRADES
+
         return {
             "total_trades": len(trades),
             "wins": len(wins),
@@ -51,4 +54,6 @@ def compute_metrics(engine: Engine) -> Dict[str, Any]:
             "avg_ev": round(avg_ev, 4),
             "calibration_error": round(calibration_error, 4),
             "avg_pnl_per_trade": round(total_pnl / len(trades), 4),
+            "calibration_reliable": calibration_reliable,
+            "min_settled_trades": MIN_SETTLED_TRADES,
         }

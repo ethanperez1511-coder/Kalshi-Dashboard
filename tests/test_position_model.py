@@ -65,25 +65,25 @@ def test_position_unrealized_pnl(db_engine: Engine) -> None:
     # (40 - 60) * 10 / 100 = -2.0
     assert yes_loss.unrealized_pnl == pytest.approx(-2.0)
 
-    # NO side: profit when current < entry (price fell = no is winning)
+    # NO side: prices stored in NO-cost terms, so profit when current > entry
     no_pos = Position(
-        market_id="MKT-002",
-        side="no",
-        entry_price=60,
-        quantity=10,
-        current_price=40,
-        status="open",
-    )
-    # (60 - 40) * 10 / 100 = 2.0
-    assert no_pos.unrealized_pnl == pytest.approx(2.0)
-
-    # NO side: loss when current > entry
-    no_loss = Position(
         market_id="MKT-002",
         side="no",
         entry_price=40,
         quantity=10,
         current_price=60,
+        status="open",
+    )
+    # (60 - 40) * 10 / 100 = 2.0
+    assert no_pos.unrealized_pnl == pytest.approx(2.0)
+
+    # NO side: loss when current < entry
+    no_loss = Position(
+        market_id="MKT-002",
+        side="no",
+        entry_price=60,
+        quantity=10,
+        current_price=40,
         status="open",
     )
     # (40 - 60) * 10 / 100 = -2.0
@@ -103,7 +103,7 @@ def test_position_cost_basis(db_engine: Engine) -> None:
     # 40 * 10 / 100 = 4.0
     assert yes_pos.cost_basis == pytest.approx(4.0)
 
-    # NO side: (100 - entry) * qty / 100
+    # NO side: entry is already the NO cost — same formula as YES
     no_pos = Position(
         market_id="MKT-002",
         side="no",
@@ -112,5 +112,5 @@ def test_position_cost_basis(db_engine: Engine) -> None:
         current_price=40,
         status="open",
     )
-    # (100 - 40) * 10 / 100 = 6.0
-    assert no_pos.cost_basis == pytest.approx(6.0)
+    # 40 * 10 / 100 = 4.0
+    assert no_pos.cost_basis == pytest.approx(4.0)

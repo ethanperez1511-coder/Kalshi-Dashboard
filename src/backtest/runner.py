@@ -76,7 +76,8 @@ class BacktestRunner:
             category = mkt["category"]
             close_date = mkt["close_date"]
 
-            # Get latest price snapshot for this market
+            # Get latest price snapshot BEFORE close_date (no lookahead)
+            decision_time = close_date
             with get_session(self._engine) as session:
                 snap_rows = session.execute(
                     select(
@@ -84,8 +85,10 @@ class BacktestRunner:
                         PriceSnapshot.yes_ask,
                         PriceSnapshot.last_price,
                         PriceSnapshot.volume,
+                        PriceSnapshot.timestamp,
                     )
                     .where(PriceSnapshot.market_id == market_id)
+                    .where(PriceSnapshot.timestamp < decision_time)
                     .order_by(PriceSnapshot.timestamp.desc())
                     .limit(1)
                 ).first()
@@ -93,7 +96,16 @@ class BacktestRunner:
             if snap_rows is None:
                 continue
 
-            yes_bid, yes_ask, last_price, volume = snap_rows
+            yes_bid, yes_ask, last_price, volume, snap_ts = snap_rows
+
+            # Lookahead guard: assert input data precedes decision time
+            if snap_ts is not None and decision_time is not None:
+                snap_dt = snap_ts if snap_ts.tzinfo else snap_ts.replace(tzinfo=timezone.utc)
+                dec_dt = decision_time if decision_time.tzinfo else decision_time.replace(tzinfo=timezone.utc)
+                assert snap_dt < dec_dt, (
+                    f"Lookahead bias: snapshot {snap_dt} >= decision time {dec_dt} "
+                    f"for {market_id}"
+                )
 
             # Run models
             models = registry.get_models_for(category)
@@ -145,14 +157,23 @@ class BacktestRunner:
             if quantity == 0:
                 continue
 
-            # Resolve: use final price > 50 as "resolved Yes"
+            # Resolve: use final price (at or after close) > 50 as "resolved Yes"
             with get_session(self._engine) as session:
                 final_snap = session.execute(
                     select(PriceSnapshot.last_price)
                     .where(PriceSnapshot.market_id == market_id)
+                    .where(PriceSnapshot.timestamp >= decision_time)
                     .order_by(PriceSnapshot.timestamp.desc())
                     .limit(1)
                 ).scalar()
+                # Fallback: if no post-close snapshot, use the very latest
+                if final_snap is None:
+                    final_snap = session.execute(
+                        select(PriceSnapshot.last_price)
+                        .where(PriceSnapshot.market_id == market_id)
+                        .order_by(PriceSnapshot.timestamp.desc())
+                        .limit(1)
+                    ).scalar()
 
             resolved_yes = (final_snap or 50) > 50
             if side == "yes":

@@ -13,7 +13,8 @@ from src.models.price import PriceSnapshot
 _PRICE_SCALE = 100.0
 
 # Minimum number of snapshots required to produce an estimate.
-_MIN_SNAPSHOTS = 5
+# Set to 1 so markets are scorable on first ingest; confidence will be low.
+_MIN_SNAPSHOTS = 1
 
 # Maximum spread considered "tight" (full spread width in price ticks).
 _TIGHT_SPREAD = 2.0

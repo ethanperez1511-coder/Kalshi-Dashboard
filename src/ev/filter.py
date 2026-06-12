@@ -4,6 +4,11 @@ from dataclasses import dataclass, field
 from typing import List
 
 from src.ev.calculator import EVResult
+from src.trading_config import (
+    MAX_MODEL_DISAGREEMENT,
+    SKIP_YES_LONGSHOTS,
+    YES_LONGSHOT_MAX_PRICE_CENTS,
+)
 
 
 @dataclass
@@ -27,17 +32,29 @@ class TradeFilter:
     min_hours_to_expiry:
         Minimum time remaining before market resolution. Very short windows
         increase execution risk.
+    max_disagreement:
+        Maximum allowed |p_model - market price| on the recommended side.
+        Larger disagreement signals bad input data rather than real edge.
+    skip_yes_longshots:
+        Reject YES buys priced below ``yes_longshot_max_price_cents``.
+        Fading longshots (NO side) is unaffected.
     """
 
     def __init__(
         self,
-        min_daily_volume: int = 500,
-        max_spread_cents: int = 5,
+        min_daily_volume: int = 100,
+        max_spread_cents: int = 15,
         min_hours_to_expiry: float = 1.0,
+        max_disagreement: float = MAX_MODEL_DISAGREEMENT,
+        skip_yes_longshots: bool = SKIP_YES_LONGSHOTS,
+        yes_longshot_max_price_cents: int = YES_LONGSHOT_MAX_PRICE_CENTS,
     ) -> None:
         self.min_daily_volume = min_daily_volume
         self.max_spread_cents = max_spread_cents
         self.min_hours_to_expiry = min_hours_to_expiry
+        self.max_disagreement = max_disagreement
+        self.skip_yes_longshots = skip_yes_longshots
+        self.yes_longshot_max_price_cents = yes_longshot_max_price_cents
 
     def _get_edge_threshold(self, confidence: float) -> float:
         """Return the minimum required edge based on model confidence.
@@ -46,10 +63,10 @@ class TradeFilter:
         demands a larger margin of safety.
         """
         if confidence >= 0.7:
-            return 0.05
+            return 0.03
         if confidence >= 0.4:
-            return 0.08
-        return 0.12
+            return 0.05
+        return 0.08
 
     def evaluate(
         self,
@@ -58,6 +75,7 @@ class TradeFilter:
         daily_volume: int,
         bid_ask_spread_cents: int,
         hours_to_expiry: float,
+        min_edge_override: float = None,
     ) -> FilterResult:
         """Evaluate a potential trade against all filter criteria.
 
@@ -79,6 +97,8 @@ class TradeFilter:
             Hours remaining until market resolution.
         """
         edge_threshold = self._get_edge_threshold(confidence)
+        if min_edge_override is not None:
+            edge_threshold = max(edge_threshold, min_edge_override)
         best_ev = ev_result.best_ev
         best_edge = ev_result.best_edge
 
@@ -114,6 +134,23 @@ class TradeFilter:
         if hours_to_expiry < self.min_hours_to_expiry:
             rejection_reasons.append(
                 f"Too close to expiry: {hours_to_expiry:.2f}h < {self.min_hours_to_expiry:.2f}h"
+            )
+
+        # 6. Disagreement cap: |p_model - market| beyond this means bad data, not edge.
+        if abs(best_edge) > self.max_disagreement + 1e-9:  # epsilon: boundary stays tradeable
+            rejection_reasons.append(
+                f"Model-market disagreement too large: |{best_edge:.4f}| > {self.max_disagreement:.4f}"
+            )
+
+        # 7. YES longshot skip: buying cheap YES contracts has shown persistent losses.
+        price_cents = ev_result.implied_prob * 100.0
+        if (
+            self.skip_yes_longshots
+            and ev_result.recommended_side == "yes"
+            and price_cents < self.yes_longshot_max_price_cents
+        ):
+            rejection_reasons.append(
+                f"YES longshot blocked: price {price_cents:.0f}c < {self.yes_longshot_max_price_cents}c"
             )
 
         qualifies = len(rejection_reasons) == 0

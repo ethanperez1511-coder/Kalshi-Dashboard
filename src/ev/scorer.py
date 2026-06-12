@@ -5,10 +5,19 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import Engine, select
 
+from src.config import Settings
 from src.database import get_session
 from src.ev.calculator import calculate_ev
 from src.ev.filter import TradeFilter
+from src.modeling.base import MODEL_TYPE_PRICE_DERIVED
+from src.modeling.odds_api import OddsClient
 from src.modeling.registry import ModelRegistry
+from src.trading_config import (
+    TRADE_PRICE_DERIVED_MODELS,
+    PRICE_DERIVED_MIN_EDGE,
+    MAX_SPREAD_CENTS,
+    MAX_SNAPSHOT_AGE_MINUTES,
+)
 from src.models.market import Market
 from src.models.opportunity import Opportunity
 from src.models.price import PriceSnapshot
@@ -24,8 +33,10 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
     4. Upsert an Opportunity row.
     5. Return a list of result dicts.
     """
-    registry = ModelRegistry()
-    trade_filter = TradeFilter()
+    settings = Settings()
+    odds_client = OddsClient(settings.ODDS_API_KEY) if settings.ODDS_API_KEY else None
+    registry = ModelRegistry(odds_client=odds_client)
+    trade_filter = TradeFilter(max_spread_cents=MAX_SPREAD_CENTS)
 
     # --- Step 1: load open markets as plain dicts ---
     with get_session(engine) as session:
@@ -35,7 +46,7 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
                 Market.title,
                 Market.category,
                 Market.close_date,
-            ).where(Market.status == "open")
+            ).where(Market.status.in_(["open", "active"]))
         ).all()
         markets = [
             {
@@ -75,10 +86,24 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
 
         yes_bid, yes_ask, last_price, volume, snap_ts = snap_row
 
+        # Skip markets with no trade history
+        if last_price == 0:
+            continue
+
+        # Stale data guard: a market with no fresh snapshot has closed early or
+        # dropped out of the ingest feed — its price is fiction, never trade it.
+        if snap_ts is not None:
+            if snap_ts.tzinfo is None:
+                snap_ts = snap_ts.replace(tzinfo=timezone.utc)
+            age_minutes = (datetime.now(timezone.utc) - snap_ts).total_seconds() / 60.0
+            if age_minutes > MAX_SNAPSHOT_AGE_MINUTES:
+                continue
+
         # --- Step 3: run models (first non-None wins) ---
         models = registry.get_models_for(category)
         model_result = None
         winning_model_name: str = "Unknown"
+        winning_model_type: str = MODEL_TYPE_PRICE_DERIVED
         for model in models:
             result = model.estimate(
                 market_id=market_id,
@@ -89,16 +114,22 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
             if result is not None:
                 model_result = result
                 winning_model_name = type(model).__name__
+                winning_model_type = model.model_type
                 break
 
         if model_result is None:
+            continue
+
+        # Gate price-derived models unless explicitly enabled
+        if winning_model_type == MODEL_TYPE_PRICE_DERIVED and not TRADE_PRICE_DERIVED_MODELS:
             continue
 
         # --- Step 4: calculate EV ---
         ev_result = calculate_ev(
             p_model=model_result.p_model,
             price_cents=last_price,
-            fee_rate=fee_rate,
+            yes_bid=yes_bid,
+            yes_ask=yes_ask,
         )
 
         # --- Step 5: calculate hours_to_expiry ---
@@ -110,12 +141,15 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
 
         # --- Step 6: run TradeFilter ---
         spread_cents = yes_ask - yes_bid
+        # Price-derived models use a higher edge threshold
+        min_edge_override = PRICE_DERIVED_MIN_EDGE if winning_model_type == MODEL_TYPE_PRICE_DERIVED else None
         filter_result = trade_filter.evaluate(
             ev_result=ev_result,
             confidence=model_result.confidence,
             daily_volume=volume,
             bid_ask_spread_cents=spread_cents,
             hours_to_expiry=hours_to_expiry,
+            min_edge_override=min_edge_override,
         )
 
         # --- Step 7: upsert Opportunity ---
@@ -140,6 +174,9 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
             "status": filter_result.status,
             "reasoning": model_result.reasoning,
             "model_name": winning_model_name,
+            "model_type": winning_model_type,
+            "yes_bid": yes_bid,
+            "yes_ask": yes_ask,
         }
         results.append(result_dict)
 

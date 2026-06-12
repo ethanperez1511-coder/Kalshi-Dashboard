@@ -28,16 +28,15 @@ class Position(Base):
 
     @property
     def unrealized_pnl(self) -> float:
-        """(current - entry) * qty / 100 for yes; (entry - current) * qty / 100 for no."""
-        if self.side == "yes":
-            return (self.current_price - self.entry_price) * self.quantity / 100
-        else:
-            return (self.entry_price - self.current_price) * self.quantity / 100
+        """(current - entry) * qty / 100.
+
+        entry_price and current_price are both stored in the position's own
+        side-cost terms (a NO position bought at 85c stores 85), so a single
+        formula covers both sides.
+        """
+        return (self.current_price - self.entry_price) * self.quantity / 100
 
     @property
     def cost_basis(self) -> float:
-        """entry * qty / 100 for yes; (100 - entry) * qty / 100 for no."""
-        if self.side == "yes":
-            return self.entry_price * self.quantity / 100
-        else:
-            return (100 - self.entry_price) * self.quantity / 100
+        """entry * qty / 100 — entry_price is already the side's own cost."""
+        return self.entry_price * self.quantity / 100

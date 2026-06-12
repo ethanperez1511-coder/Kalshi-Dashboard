@@ -5,9 +5,11 @@ from typing import Optional
 from sqlalchemy import Engine
 from src.database import get_session
 from src.ev.calculator import EVResult
-from src.risk.kelly import kelly_size
+from src.risk.kelly import kelly_size, calibration_shrinkage
 from src.risk.limits import LimitsChecker
 from src.models.settings import TradingSettings
+from src.models.trade import Trade
+from src.trading_config import MIN_SETTLED_TRADES
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +44,18 @@ class RiskManager:
         if side == "no":
             price_cents = 100 - price_cents
 
+        # Compute shrinkage multiplier from calibration (if enough data)
+        shrinkage = 1.0
+        with get_session(self._engine) as session:
+            closed_count = session.query(Trade).filter(Trade.status == "closed").count()
+            if closed_count >= MIN_SETTLED_TRADES:
+                closed_trades = session.query(Trade).filter(Trade.status == "closed").all()
+                wins = [t for t in closed_trades if (t.realized_pnl or 0) > 0]
+                avg_p = sum(t.p_model for t in closed_trades) / len(closed_trades)
+                actual_wr = len(wins) / len(closed_trades)
+                cal_err = abs(avg_p - actual_wr)
+                shrinkage = calibration_shrinkage(cal_err)
+
         # Kelly sizing
         p = ev_result.p_model if side == "yes" else (1 - ev_result.p_model)
         kelly = kelly_size(
@@ -49,6 +63,7 @@ class RiskManager:
             price_cents=price_cents,
             bankroll=settings.bankroll,
             kelly_fraction=settings.kelly_fraction,
+            shrinkage_multiplier=shrinkage,
         )
 
         # Cap at max single trade

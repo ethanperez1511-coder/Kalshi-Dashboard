@@ -27,6 +27,7 @@ class Trade(Base):
     reasoning: Mapped[str] = mapped_column(Text)
     is_paper: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(20), index=True)
+    order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, default=None)
     exit_price: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
     realized_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(

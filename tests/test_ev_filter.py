@@ -33,7 +33,7 @@ def test_rejects_negative_ev():
 def test_rejects_low_volume():
     ev = EVResult(p_model=0.77, implied_prob=0.65, edge=0.12, no_edge=-0.12,
                   raw_ev=0.12, net_ev=0.10, no_ev=-0.14, recommended_side="yes", fee_rate=0.01)
-    result = TradeFilter().evaluate(ev_result=ev, confidence=0.8, daily_volume=100,
+    result = TradeFilter().evaluate(ev_result=ev, confidence=0.8, daily_volume=50,
                                     bid_ask_spread_cents=2, hours_to_expiry=48)
     assert result.qualifies is False
 
@@ -42,7 +42,7 @@ def test_rejects_wide_spread():
     ev = EVResult(p_model=0.77, implied_prob=0.65, edge=0.12, no_edge=-0.12,
                   raw_ev=0.12, net_ev=0.10, no_ev=-0.14, recommended_side="yes", fee_rate=0.01)
     result = TradeFilter().evaluate(ev_result=ev, confidence=0.8, daily_volume=5000,
-                                    bid_ask_spread_cents=8, hours_to_expiry=48)
+                                    bid_ask_spread_cents=20, hours_to_expiry=48)
     assert result.qualifies is False
 
 
@@ -55,8 +55,9 @@ def test_rejects_expiring_soon():
 
 
 def test_medium_confidence_raises_threshold():
-    ev = EVResult(p_model=0.71, implied_prob=0.65, edge=0.06, no_edge=-0.06,
-                  raw_ev=0.06, net_ev=0.04, no_ev=-0.08, recommended_side="yes", fee_rate=0.01)
+    # High confidence threshold is 0.03, medium is 0.05 — edge 0.04 sits between.
+    ev = EVResult(p_model=0.69, implied_prob=0.65, edge=0.04, no_edge=-0.04,
+                  raw_ev=0.04, net_ev=0.02, no_ev=-0.06, recommended_side="yes", fee_rate=0.01)
     result_high = TradeFilter().evaluate(ev_result=ev, confidence=0.8, daily_volume=5000,
                                          bid_ask_spread_cents=2, hours_to_expiry=48)
     assert result_high.qualifies is True

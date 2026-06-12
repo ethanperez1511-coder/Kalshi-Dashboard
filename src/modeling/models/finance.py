@@ -8,6 +8,7 @@ from src.database import get_session
 from src.modeling.base import BaseModel, ModelResult
 from src.modeling.confidence import ConfidenceScore
 from src.models.price import PriceSnapshot
+from src.trading_config import ENABLE_KEYWORD_PRIORS
 
 # Kalshi prices are integers in [0, 100] representing cents per dollar.
 _PRICE_SCALE = 100.0
@@ -103,7 +104,7 @@ class FinanceModel(BaseModel):
         ]
         consensus = sum(midpoints) / len(midpoints)
 
-        keyword_match = _find_keyword_prior(title)
+        keyword_match = _find_keyword_prior(title) if ENABLE_KEYWORD_PRIORS else None
 
         if keyword_match is not None:
             keyword, prior = keyword_match

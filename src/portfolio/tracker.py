@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 from sqlalchemy import Engine
 from src.database import get_session
+from src.models.market import Market
 from src.models.position import Position
 from src.models.trade import Trade
 from src.models.settings import TradingSettings
@@ -16,8 +17,14 @@ class PortfolioTracker:
         self._engine = engine
 
     def close_position(
-        self, market_id: str, exit_price: int,
+        self, market_id: str, exit_price: int, finalize_market: bool = False,
     ) -> Optional[Dict[str, Any]]:
+        """Close the open position for a market at settlement.
+
+        exit_price is the YES-scale settlement value (100 if resolved yes,
+        0 if no). Position prices are stored in side-cost terms, so the exit
+        is converted to the position's side before computing PnL.
+        """
         with get_session(self._engine) as session:
             pos = (
                 session.query(Position)
@@ -27,16 +34,21 @@ class PortfolioTracker:
             if not pos:
                 return None
 
-            # Calculate realized PnL
-            if pos.side == "yes":
-                realized_pnl = (exit_price - pos.entry_price) * pos.quantity / 100.0
-            else:
-                realized_pnl = (pos.entry_price - exit_price) * pos.quantity / 100.0
+            # Convert YES-scale settlement to this side's terms, then one formula.
+            pos_side = pos.side
+            side_exit = exit_price if pos_side == "yes" else 100 - exit_price
+            realized_pnl = (side_exit - pos.entry_price) * pos.quantity / 100.0
 
             # Close the position
             pos.status = "closed"
-            pos.current_price = exit_price
+            pos.current_price = side_exit
             pos.closed_at = datetime.now(timezone.utc)
+
+            # Mark the market finalized so it is never scored or traded again.
+            if finalize_market:
+                mkt = session.query(Market).filter_by(market_id=market_id).first()
+                if mkt:
+                    mkt.status = "finalized"
 
             # Update the trade record
             trade = (
@@ -47,7 +59,7 @@ class PortfolioTracker:
             )
             if trade:
                 trade.status = "closed"
-                trade.exit_price = exit_price
+                trade.exit_price = side_exit  # same side-cost terms as trade.price
                 trade.realized_pnl = realized_pnl
 
             # Update bankroll
@@ -60,12 +72,12 @@ class PortfolioTracker:
             session.commit()
 
             logger.info(
-                f"Closed {market_id} @ {exit_price}c — PnL ${realized_pnl:.2f}"
+                f"Closed {market_id} ({pos_side} @ {side_exit}c) — PnL ${realized_pnl:.2f}"
             )
 
             return {
                 "market_id": market_id,
-                "exit_price": exit_price,
+                "exit_price": side_exit,
                 "realized_pnl": realized_pnl,
                 "status": "closed",
             }

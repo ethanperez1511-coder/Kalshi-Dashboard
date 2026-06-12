@@ -95,7 +95,8 @@ def test_finance_model_skips_non_finance(db_engine):
 # test_finance_model_adjusts_for_keywords
 # ---------------------------------------------------------------------------
 
-def test_finance_model_adjusts_for_keywords(db_engine):
+def test_finance_model_adjusts_for_keywords(db_engine, monkeypatch):
+    monkeypatch.setattr("src.modeling.models.finance.ENABLE_KEYWORD_PRIORS", True)
     Base.metadata.create_all(db_engine)
     with get_session(db_engine) as session:
         _add_market(

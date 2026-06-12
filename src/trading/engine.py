@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
@@ -8,13 +9,59 @@ from src.models.trade import Trade
 from src.models.position import Position
 from src.models.settings import TradingSettings
 from src.risk.manager import TradeDecision
+from src.trading_config import ORDER_TYPE, REQUOTE_SECONDS, PAPER_CONSERVATIVE_FILLS
 
 logger = logging.getLogger(__name__)
 
+# How long to poll for order fill before cancelling (seconds)
+DEFAULT_FILL_TIMEOUT = 300
+POLL_INTERVAL = 5
+
+
+def _run_async(coro):
+    """Run a coroutine to completion from sync or async calling contexts.
+
+    Inside a running event loop (e.g. a FastAPI handler), asyncio.run() and
+    loop.run_until_complete() both raise — run it on a worker thread instead.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as pool:
+            return pool.submit(asyncio.run, coro).result()
+    return asyncio.run(coro)
+
+
+def sync_live_bankroll(engine: Engine, kalshi_client) -> Optional[float]:
+    """Overwrite the DB bankroll with the real Kalshi cash balance.
+
+    Live mode only — the paper bankroll is virtual and must never be
+    overwritten by this. Returns the synced dollar amount, or None if no
+    client was provided.
+    """
+    if kalshi_client is None:
+        return None
+    balance = _run_async(kalshi_client.get_balance())
+    dollars = round(balance.balance / 100.0, 2)
+    with get_session(engine) as session:
+        s = session.query(TradingSettings).first()
+        if s:
+            s.bankroll = dollars
+            if dollars > s.peak_bankroll:
+                s.peak_bankroll = dollars
+        session.commit()
+    logger.info(f"Live bankroll synced from Kalshi: ${dollars:.2f}")
+    return dollars
+
 
 class TradeEngine:
-    def __init__(self, engine: Engine):
+    def __init__(self, engine: Engine, kalshi_client=None):
         self._engine = engine
+        self._client = kalshi_client
+        self._fill_timeout = DEFAULT_FILL_TIMEOUT
 
     def _get_mode(self) -> dict:
         with get_session(self._engine) as session:
@@ -35,6 +82,34 @@ class TradeEngine:
             return False
         return True
 
+    def _compute_fill_price(
+        self, decision: TradeDecision, yes_bid: int = 0, yes_ask: int = 0,
+        is_paper: bool = False,
+    ) -> int:
+        """Compute realistic fill price based on order type.
+
+        Taker: crosses spread (buy at ask, sell at bid).
+        Maker: posts limit inside spread (bid+1 for buys).
+        Paper with PAPER_CONSERVATIVE_FILLS: always taker pricing, since a real
+        maker order at bid+1 may never fill — keeps paper PnL pessimistic.
+        """
+        if is_paper and PAPER_CONSERVATIVE_FILLS and yes_bid > 0 and yes_ask > 0:
+            if decision.side == "yes":
+                return yes_ask
+            else:
+                return 100 - yes_bid
+        if ORDER_TYPE == "taker" and yes_bid > 0 and yes_ask > 0:
+            if decision.side == "yes":
+                return yes_ask  # pay the ask
+            else:
+                return 100 - yes_bid  # No cost = 100 - yes_bid
+        elif ORDER_TYPE == "maker" and yes_bid > 0 and yes_ask > 0:
+            if decision.side == "yes":
+                return min(yes_bid + 1, yes_ask)  # post inside spread
+            else:
+                return max(100 - yes_ask + 1, 100 - yes_ask)  # No side
+        return decision.price_cents
+
     def execute(
         self,
         decision: TradeDecision,
@@ -45,6 +120,8 @@ class TradeEngine:
         net_ev: float,
         confidence: float,
         reasoning: str,
+        yes_bid: int = 0,
+        yes_ask: int = 0,
     ) -> Optional[Dict[str, Any]]:
         if not decision.approved:
             logger.info(f"Trade rejected for {market_id}: {decision.rejection_reasons}")
@@ -53,14 +130,26 @@ class TradeEngine:
         mode_info = self._get_mode()
         is_paper = mode_info["mode"] == "paper" or not self.can_trade_live()
 
+        # Compute realistic fill price (paper uses conservative taker pricing)
+        fill_price = self._compute_fill_price(decision, yes_bid, yes_ask, is_paper=is_paper)
+
         if is_paper:
             return self._execute_paper(
                 decision, market_id, p_model, implied_prob,
-                edge, net_ev, confidence, reasoning,
+                edge, net_ev, confidence, reasoning, fill_price,
             )
         else:
-            # Live execution placeholder
-            raise NotImplementedError("Live trading requires Kalshi API credentials")
+            if self._client is None:
+                raise RuntimeError(
+                    "Live trading requires a KalshiClient. "
+                    "Pass kalshi_client to TradeEngine."
+                )
+            return _run_async(
+                self._execute_live(
+                    decision, market_id, p_model, implied_prob,
+                    edge, net_ev, confidence, reasoning, fill_price,
+                )
+            )
 
     def _execute_paper(
         self,
@@ -72,14 +161,15 @@ class TradeEngine:
         net_ev: float,
         confidence: float,
         reasoning: str,
+        fill_price: int = 0,
     ) -> Dict[str, Any]:
+        actual_price = fill_price if fill_price > 0 else decision.price_cents
         with get_session(self._engine) as session:
-            # Create trade record
             trade = Trade(
                 market_id=market_id,
                 side=decision.side,
                 action="buy",
-                price=decision.price_cents,
+                price=actual_price,
                 quantity=decision.quantity,
                 p_model=p_model,
                 implied_prob=implied_prob,
@@ -93,7 +183,6 @@ class TradeEngine:
             )
             session.add(trade)
 
-            # Create or update position
             existing_pos = (
                 session.query(Position)
                 .filter_by(market_id=market_id, side=decision.side, status="open")
@@ -105,14 +194,13 @@ class TradeEngine:
                 pos = Position(
                     market_id=market_id,
                     side=decision.side,
-                    entry_price=decision.price_cents,
+                    entry_price=actual_price,
                     quantity=decision.quantity,
-                    current_price=decision.price_cents,
+                    current_price=actual_price,
                     status="open",
                 )
                 session.add(pos)
 
-            # Increment paper trade count
             settings = session.query(TradingSettings).first()
             if settings:
                 settings.paper_trade_count += 1
@@ -121,16 +209,227 @@ class TradeEngine:
 
             logger.info(
                 f"Paper trade executed: {market_id} {decision.side} "
-                f"x{decision.quantity} @ {decision.price_cents}c "
+                f"x{decision.quantity} @ {actual_price}c "
                 f"(${decision.position_size_dollars:.2f})"
             )
 
             return {
                 "market_id": market_id,
                 "side": decision.side,
-                "price": decision.price_cents,
+                "price": actual_price,
                 "quantity": decision.quantity,
                 "dollars": decision.position_size_dollars,
                 "is_paper": True,
                 "status": "filled",
             }
+
+    async def _execute_live(
+        self,
+        decision: TradeDecision,
+        market_id: str,
+        p_model: float,
+        implied_prob: float,
+        edge: float,
+        net_ev: float,
+        confidence: float,
+        reasoning: str,
+        fill_price: int = 0,
+    ) -> Dict[str, Any]:
+        # Limit price in the order's own side terms (maker price from
+        # _compute_fill_price); fall back to the decision price.
+        limit_price = fill_price if fill_price > 0 else decision.price_cents
+
+        # 1. Create pending trade record BEFORE API call
+        trade_id = self._create_pending_trade(
+            decision, market_id, p_model, implied_prob,
+            edge, net_ev, confidence, reasoning, limit_price,
+        )
+
+        order_id = None
+        try:
+            # 2. Place limit order via Kalshi API
+            resp = await self._client.place_order(
+                ticker=market_id,
+                side=decision.side,
+                count=decision.quantity,
+                price_cents=limit_price,
+                action="buy",
+            )
+            order_id = resp.order_id
+            self._update_trade_order_id(trade_id, order_id)
+            logger.info(
+                f"Live order placed: {market_id} {decision.side} "
+                f"x{decision.quantity} @ {limit_price}c — order_id={order_id}"
+            )
+
+            # 3. Poll for fill; on timeout count any partial fill
+            filled_qty = await self._poll_for_fill(order_id, decision.quantity)
+
+            if filled_qty == decision.quantity:
+                self._mark_trade_filled(trade_id, decision, market_id, limit_price, filled_qty)
+                logger.info(f"Live order FILLED: {order_id}")
+                status = "filled"
+            elif filled_qty > 0:
+                # Partial fill at timeout: keep what filled, cancel the rest.
+                await self._cancel_order_safe(order_id)
+                self._mark_trade_filled(trade_id, decision, market_id, limit_price, filled_qty)
+                logger.warning(
+                    f"Live order PARTIALLY filled ({filled_qty}/{decision.quantity}), "
+                    f"remainder cancelled: {order_id}"
+                )
+                status = "partial"
+            else:
+                await self._cancel_order_safe(order_id)
+                self._update_trade_status(trade_id, "cancelled")
+                logger.warning(f"Live order TIMED OUT and cancelled: {order_id}")
+                status = "cancelled"
+
+            return {
+                "market_id": market_id,
+                "side": decision.side,
+                "price": limit_price,
+                "quantity": filled_qty if status == "partial" else decision.quantity,
+                "dollars": round(limit_price * filled_qty / 100.0, 2),
+                "is_paper": False,
+                "status": status,
+                "order_id": order_id,
+            }
+
+        except Exception:
+            logger.exception(f"Live trade error for {market_id} (order_id={order_id})")
+            if order_id:
+                await self._cancel_order_safe(order_id)
+            self._update_trade_status(trade_id, "error")
+            return {
+                "market_id": market_id,
+                "side": decision.side,
+                "price": limit_price,
+                "quantity": decision.quantity,
+                "dollars": decision.position_size_dollars,
+                "is_paper": False,
+                "status": "error",
+                "order_id": order_id,
+            }
+
+    def _create_pending_trade(
+        self, decision, market_id, p_model, implied_prob,
+        edge, net_ev, confidence, reasoning, limit_price: int = 0,
+    ) -> int:
+        with get_session(self._engine) as session:
+            trade = Trade(
+                market_id=market_id,
+                side=decision.side,
+                action="buy",
+                price=limit_price if limit_price > 0 else decision.price_cents,
+                quantity=decision.quantity,
+                p_model=p_model,
+                implied_prob=implied_prob,
+                edge=edge,
+                net_ev=net_ev,
+                position_size_dollars=decision.position_size_dollars,
+                confidence=confidence,
+                reasoning=reasoning,
+                is_paper=False,
+                status="pending",
+            )
+            session.add(trade)
+            session.commit()
+            return trade.id
+
+    def _update_trade_order_id(self, trade_id: int, order_id: str):
+        with get_session(self._engine) as session:
+            trade = session.get(Trade, trade_id)
+            if trade:
+                trade.order_id = order_id
+            session.commit()
+
+    def _update_trade_status(self, trade_id: int, status: str):
+        with get_session(self._engine) as session:
+            trade = session.get(Trade, trade_id)
+            if trade:
+                trade.status = status
+            session.commit()
+
+    def _mark_trade_filled(
+        self, trade_id: int, decision, market_id: str,
+        fill_price: int, filled_qty: int,
+    ):
+        """Record a (possibly partial) live fill.
+
+        fill_price is in the order's own side terms — positions store
+        side-cost everywhere. Bankroll is debited the actual fill cost,
+        not the pre-trade size estimate.
+        """
+        with get_session(self._engine) as session:
+            trade = session.get(Trade, trade_id)
+            if trade:
+                trade.status = "filled"
+                trade.quantity = filled_qty
+
+            # Create or update position
+            existing_pos = (
+                session.query(Position)
+                .filter_by(market_id=market_id, side=decision.side, status="open")
+                .first()
+            )
+            if existing_pos:
+                existing_pos.quantity += filled_qty
+            else:
+                pos = Position(
+                    market_id=market_id,
+                    side=decision.side,
+                    entry_price=fill_price,
+                    quantity=filled_qty,
+                    current_price=fill_price,
+                    status="open",
+                )
+                session.add(pos)
+
+            # Deduct actual cost from bankroll
+            settings = session.query(TradingSettings).first()
+            if settings:
+                settings.bankroll = round(
+                    settings.bankroll - fill_price * filled_qty / 100.0, 2
+                )
+
+            session.commit()
+
+    async def _poll_for_fill(self, order_id: str, quantity: int) -> int:
+        """Poll until the order fills, is cancelled, or times out.
+
+        Returns the number of contracts filled (0..quantity) — a timeout
+        with a partial fill reports the filled portion, not zero.
+        """
+        def _filled_from(order: dict) -> int:
+            remaining = order.get("remaining_count", quantity)
+            return max(0, quantity - remaining)
+
+        order = {}
+        elapsed = 0
+        while elapsed < self._fill_timeout:
+            order_data = await self._client.get_order(order_id)
+            order = order_data.get("order", order_data)
+            status = order.get("status", "")
+            remaining = order.get("remaining_count", 1)
+
+            if status == "executed" or remaining == 0:
+                return quantity
+            if status in ("canceled", "cancelled"):
+                return _filled_from(order)
+
+            await asyncio.sleep(POLL_INTERVAL)
+            elapsed += POLL_INTERVAL
+
+        # Timed out — report whatever has filled so far.
+        try:
+            order_data = await self._client.get_order(order_id)
+            order = order_data.get("order", order_data)
+        except Exception:
+            logger.exception(f"Final order state fetch failed for {order_id}")
+        return _filled_from(order)
+
+    async def _cancel_order_safe(self, order_id: str):
+        try:
+            await self._client.cancel_order(order_id)
+        except Exception:
+            logger.exception(f"Failed to cancel order {order_id}")

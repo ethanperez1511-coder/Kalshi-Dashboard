@@ -1,1 +1,10 @@
 .superpowers/
+.env
+*.pem
+*.key
+kalshi.db
+kalshi.db.bak*
+*.log
+__pycache__/
+*.egg-info/
+.DS_Store
