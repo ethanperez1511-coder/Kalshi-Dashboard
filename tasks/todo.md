@@ -185,3 +185,81 @@ expect net-of-fee PnL). Changes: (1) local pipeline killed — Railway sole syst
 (5) 14-day max-expiry filter for fast capital recycling; (6) Polymarket scan 1000→3000.
 All changes tighten the trade set or make paper PnL more conservative. Risk limits, mode
 default, and live gate untouched.
+
+---
+
+# Migrate host: Railway (dead) → GitHub Actions cron + Neon Postgres (2026-07-03)
+
+## Context
+- Railway "used all available resources" → container stopped ~2 weeks ago → zero cycles →
+  zero paper trades → zero Telegram. Root cause = host died, NOT a code bug. Creds were set.
+- Deeper defect: no deadman. Dead process can't Telegram its own death; idle cycles are silent
+  (`if not qualifying: return` before any alert); `Alerter` logs nothing when disabled;
+  `cycle_summary()` heartbeat method exists but is never called. Alive-idle == dead from phone.
+- User wants FREE + always-running. Every free PaaS tier (Railway/Fly/Render/Heroku) is gone.
+  Chosen architecture: GitHub Actions scheduled cron (unlimited minutes on a PUBLIC repo) runs
+  ONE pipeline cycle per tick; state lives in Neon Postgres (free, always-on, no card).
+  Nothing persistent to exhaust → the exact failure mode that just bit us is structurally gone.
+  GitHub emails on any failed workflow run = built-in death alert.
+- Security pre-check DONE: no secrets in git history or tree (.env/*.pem/*.key/*.db/*.log all
+  gitignored; .env.example empty; key prefixes 3f6b…/9806… absent everywhere). Safe to make public.
+
+## Safety statement (per CLAUDE.md — over-exposure / accidental live / DB corruption)
+- Accidental live execution: `mode` lives in the DB (`trading_settings.mode`), default 'paper'.
+  Migration MUST carry mode='paper' (or start fresh at paper). NO env var flips live. GH Secret
+  set is data-only; no change touches `paper_trading_mode` resolution or the live gate. Prove
+  default-paper preserved in review.
+- Over-exposure: cron every 5 min could overlap if a cycle runs >5 min → two writers → double
+  execution against one Neon DB. Mitigate with workflow `concurrency` (one run at a time, do NOT
+  cancel-in-progress mid-trade) + single-connection writer. Risk limits (quarter-Kelly, 3%/trade,
+  25% exposure, 20% breaker) are unchanged code; add a test asserting they still hold post-migration.
+- DB corruption: Postgres is transactional; `get_session` commit/rollback pattern unchanged;
+  Pydantic validation at the FastAPI boundary unchanged. Single writer enforced by cron concurrency.
+  No schema change — same SQLAlchemy models create_all on Neon.
+
+## Tasks
+- [x] 1. Audit for SQLite-isms. RESULT: Postgres-clean. autoincrement PKs → SERIAL (portable),
+      no JSON/binary/pickle columns, no PRAGMA/strftime/julianday/raw-SQL, no text(). All datetime
+      comparisons (scorer stale-snapshot guard, settler) done in Python on ORM objects, not in SQL.
+      database.py already conditional on `sqlite` prefix — Postgres just skips connect_args.
+      Migration = driver + connection string, nothing more.
+- [x] 2. Add Postgres driver to pyproject (`psycopg[binary]>=3.2`). SQLite kept for local/tests.
+- [ ] 3. Provision Neon (user step, I give exact clicks): free project → copy `DATABASE_URL`
+      (`postgresql+psycopg://…?sslmode=require`). Fresh DB → `Base.metadata.create_all` + seed
+      `TradingSettings` (bankroll $100, mode='paper', paper_trade_count=0). NOTE: paper eval window
+      restarts at 0/50 — the Railway volume's post-reset history is stranded on the dead host.
+      Confirm fresh-start is acceptable (alternative: pay Railway briefly to export volume — more work).
+- [x] 4. GitHub Actions workflow `.github/workflows/trade.yml`: cron `*/5 * * * *` +
+      `workflow_dispatch`; `concurrency {group, cancel-in-progress:false}` (one cycle, never killed
+      mid-trade); checkout → setup-python 3.12 → `pip install .` → `python -m src.run_trading`
+      (SINGLE cycle, no --loop); `timeout-minutes: 8`; env from GH Secrets; base64 PEM via code.
+- [ ] 5. GH Secrets (user step): TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, KALSHI_API_KEY,
+      KALSHI_PRIVATE_KEY_B64, ODDS_API_KEY, DATABASE_URL (Neon). No secret enables live mode.
+- [x] 6. Deadman defect fixed (host-independent):
+      - `Alerter.__init__` logs a WARNING when disabled (visible in Actions logs).
+      - Daily heartbeat: `TradingSettings.heartbeat_due/record_heartbeat` (new nullable
+        last_heartbeat_at column) → `alerter.heartbeat(...)` fires once/24h, placed BEFORE the
+        idle early-return so a quiet-but-alive system still pings. GH failed-run email covers crashes.
+      - healthchecks.io ping = optional future add (not needed; Actions email + heartbeat suffice).
+- [x] 7. TDD: tests/test_host_migration.py (9 tests) — base64/literal-\n/raw PEM decode, Alerter
+      disabled-warning, heartbeat due/not-due/24h, and a risk-limits-unchanged guard
+      (3%/25%/20%/quarter-Kelly/50-gate/mode=paper/count=0). Failed first, then pass. Full suite 250 pass.
+- [ ] 8. Make repo public (user step) — required for unlimited Actions minutes → 5-min cycles free.
+- [ ] 9. Verify end-to-end: trigger workflow manually (`workflow_dispatch`), confirm run in Actions
+      tab writes to Neon, logs a cycle, and Telegram fires (heartbeat or a trade). Screenshot/log proof.
+
+## Open question for user (before task 3)
+- Fresh paper history (0/50 restart) on Neon — OK? Or export the stranded Railway data first?
+  → RESOLVED 2026-07-03: user chose FRESH START (0/50). Old Railway data abandoned.
+
+## Review (code portion — 2026-07-03)
+Host migration code complete + verified; remaining work is user cloud setup (Neon, GH Secrets, public).
+- SQLite→Postgres: audit proved dialect-agnostic; added `psycopg[binary]`; SQLite kept for tests.
+- Actions cron replaces the always-on process → nothing persistent to exhaust (kills the Railway
+  failure mode); failed-run email = death alert; concurrency guard prevents overlapping writers.
+- Deadman fixed: Alerter warns when disabled; daily heartbeat distinguishes alive-idle from dead.
+- base64 PEM transport ends the literal-\n secret corruption class of bug.
+Safety proof (CLAUDE.md): mode default 'paper' asserted by test; risk limits (3%/25%/20%/quarter-Kelly)
+asserted unchanged by test; single-writer via cron concurrency → no double-execution/over-exposure;
+Postgres transactional + unchanged get_session commit/rollback → no corruption. No live path touched.
+Evidence: full suite 250 passed (9 new). Real-Neon connection = task 9 (needs user DATABASE_URL).

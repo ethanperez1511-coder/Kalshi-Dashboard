@@ -15,10 +15,17 @@ def load_private_key(pem_path: str) -> rsa.RSAPrivateKey:
 
 
 def load_private_key_from_string(pem_content: str) -> rsa.RSAPrivateKey:
-    # Cloud env vars (Railway, Render, etc.) often store multiline values with
-    # literal \n instead of real newlines — decode both forms.
-    pem_content = pem_content.replace("\\n", "\n")
-    return _parse_pem(pem_content.encode())
+    # Cloud env vars store multiline PEMs three ways; accept all of them:
+    #   1. raw PEM with real newlines
+    #   2. literal \n instead of real newlines (Railway-style)
+    #   3. base64 of the whole PEM (robust transport — dodges newline corruption
+    #      entirely; the preferred form for GitHub Actions secrets).
+    s = pem_content.strip()
+    if "-----BEGIN" not in s:
+        # No PEM header present → assume base64-encoded PEM.
+        s = base64.b64decode(s).decode()
+    s = s.replace("\\n", "\n")
+    return _parse_pem(s.encode())
 
 
 def _parse_pem(pem_bytes: bytes) -> rsa.RSAPrivateKey:

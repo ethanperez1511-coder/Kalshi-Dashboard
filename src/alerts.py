@@ -28,6 +28,11 @@ class Alerter:
         self._token = token or os.environ.get("TELEGRAM_TOKEN", "")
         self._chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
         self._enabled = bool(self._token and self._chat_id)
+        if not self._enabled:
+            logger.warning(
+                "Telegram alerts DISABLED — TELEGRAM_TOKEN/TELEGRAM_CHAT_ID not set. "
+                "No trade/settlement/error/heartbeat notifications will be sent."
+            )
 
     def send(self, text: str) -> None:
         if self._enabled:
@@ -55,6 +60,12 @@ class Alerter:
         self.send(
             f"🔄 Cycle {cycle}\n"
             f"Trades: {trades} | Bankroll: ${bankroll:.2f} | Paper: {paper_count}/50"
+        )
+
+    def heartbeat(self, bankroll: float, paper_count: int, total: int) -> None:
+        self.send(
+            f"✅ Alive — bankroll ${bankroll:.2f} | "
+            f"paper {paper_count}/{total} | (daily heartbeat)"
         )
 
     def error(self, msg: str) -> None:

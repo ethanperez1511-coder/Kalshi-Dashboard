@@ -1,0 +1,40 @@
+name: paper-trade-cycle
+
+# Runs ONE pipeline cycle per tick. Cron is the interval — no --loop, no long-lived
+# process to run out of resources. State lives in Neon Postgres (DATABASE_URL secret).
+# A failed run emails the repo owner = built-in death alert.
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 min (unlimited minutes on a public repo)
+  workflow_dispatch: {}      # manual "Run workflow" button for verification
+
+# One cycle at a time. Never cancel a running cycle mid-trade (would risk a partial
+# write / double-execution against the single-writer Postgres DB). Extra ticks queue.
+concurrency:
+  group: paper-trade-cycle
+  cancel-in-progress: false
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8   # kill a hung cycle so it can't block the next tick forever
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install .
+      - name: Run one paper-trading cycle
+        env:
+          # Data-only secrets. NONE of these enable live mode — `mode` lives in the
+          # DB and defaults to 'paper'. Live requires a deliberate human DB change.
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          KALSHI_API_KEY: ${{ secrets.KALSHI_API_KEY }}
+          # base64 of the PEM — load_private_key_from_string() decodes it (dodges the
+          # literal-\n corruption hit on Railway, commit 7d35af5).
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY_B64 }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+        run: python -m src.run_trading   # single cycle (NO --loop)

@@ -93,6 +93,12 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     rejected = [r for r in results if r["status"] == "rejected"]
     logger.info(f"Scored {len(results)} markets: {len(qualifying)} qualifying, {len(watching)} watching, {len(rejected)} rejected")
 
+    # Daily liveness heartbeat — fires even on idle (zero-trade) cycles, before the
+    # early return below, so a healthy-but-quiet system is distinguishable from a dead one.
+    if TradingSettings.heartbeat_due(engine):
+        alerter.heartbeat(ts.bankroll, ts.paper_trade_count, ts.paper_trades_before_live)
+        TradingSettings.record_heartbeat(engine)
+
     for r in results:
         symbol = "✓" if r["status"] == "qualifying" else ("~" if r["status"] == "watching" else "✗")
         logger.info(
