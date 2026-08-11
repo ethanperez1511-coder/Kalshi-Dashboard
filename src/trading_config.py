@@ -193,3 +193,20 @@ MIN_SETTLED_TRADES: int = _env_int("TRADING_MIN_SETTLED_TRADES", 100)
 
 # --- Change 10: Correlation-aware exposure ---
 MAX_CLUSTER_EXPOSURE: float = _env_float("TRADING_MAX_CLUSTER_EXPOSURE", 0.10)
+
+
+# --- Phase 3: maker-first execution -------------------------------------
+# Every value here is a knob the Phase 4 experiment framework should sweep;
+# the defaults are the current behaviour, not a tuned optimum.
+MAKER_REST_SECONDS: int = _env_int("TRADING_MAKER_REST_SECONDS", 30)
+MAKER_STEP_CENTS: int = _env_int("TRADING_MAKER_STEP_CENTS", 1)
+MAKER_MAX_STEPS: int = _env_int("TRADING_MAKER_MAX_STEPS", 3)
+MAKER_TIMEOUT_SECONDS: int = _env_int("TRADING_MAKER_TIMEOUT_SECONDS", 300)
+
+# Shadow simulation records what a maker order WOULD have done. It writes only
+# to its own table and never touches `trades`, so the 50-trade gate keeps
+# accruing on the real taker path.
+SHADOW_MAKER_ENABLED: bool = _env_bool("TRADING_SHADOW_MAKER_ENABLED", False)
+# Actually resting maker orders. Stays OFF until the simulator is validated
+# against enough recorded book history — see tasks/PHASE_3_DESIGN.md §5.
+MAKER_ENABLED: bool = _env_bool("TRADING_MAKER_ENABLED", False)

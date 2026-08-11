@@ -19,6 +19,7 @@ from src.kalshi.client import KalshiClient
 from src.ingestion.series_ingest import coverage_from_db
 from src.weather.archive import run_daily_archive
 from src.weather.digest import format_weather_digest, weather_digest
+from src.recorder.health import format_recorder_health, recorder_health
 from src.weather.fitting import guard_events
 from src.weather.stations import STATIONS
 from src.modeling.match_seed import apply_seed_decisions
@@ -131,11 +132,24 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     # Daily liveness heartbeat — fires even on idle (zero-trade) cycles, before the
     # early return below, so a healthy-but-quiet system is distinguishable from a dead one.
     if TradingSettings.heartbeat_due(engine):
+        # The heartbeat is the deadman: it exists to prove the system is alive
+        # on days when nothing trades. Enriching it must never be what silences
+        # it, so every added section degrades to a note rather than an exception.
+        def _section(label, build):
+            try:
+                return build()
+            except Exception:
+                logger.warning("%s digest section failed", label, exc_info=True)
+                return f"{label}: unavailable (see logs)"
+
         alerter.heartbeat(
             ts.bankroll, ts.paper_trade_count, ts.paper_trades_before_live,
-            coverage=coverage_from_db(engine),
-            per_model=trades_by_model(engine),
-            weather=format_weather_digest(weather_digest(engine)),
+            coverage=_section("coverage", lambda: coverage_from_db(engine)) or None,
+            per_model=_section("per-model", lambda: trades_by_model(engine)) or None,
+            weather="\n".join([
+                _section("🌡 Weather", lambda: format_weather_digest(weather_digest(engine))),
+                _section("🎙 Recorder", lambda: format_recorder_health(recorder_health(engine))),
+            ]),
         )
         TradingSettings.record_heartbeat(engine)
 
