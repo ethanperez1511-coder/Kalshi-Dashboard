@@ -22,6 +22,7 @@ from src.config import Settings
 from src.database import get_engine, verify_or_migrate
 from src.kalshi.auth import KalshiAuth
 from src.recorder.book_recorder import BookRecorder, markets_to_record
+from src.run_summary import write_summary
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -45,6 +46,7 @@ def main(argv=None) -> int:
 
     markets = markets_to_record(engine, limit=args.max_markets)
     if not markets:
+        write_summary("Book recorder: NO MARKETS to record", ok=False)
         logger.error(
             "No markets to record — nothing is scored or held, so there is "
             "nothing whose fills we would later need to simulate"
@@ -61,6 +63,11 @@ def main(argv=None) -> int:
     stats = asyncio.run(recorder.run(args.duration))
 
     logger.info(stats.summary())
+    write_summary(
+        f"Book recorder: {stats.written} messages, {len(stats.markets)} markets, "
+        f"{stats.gaps} gaps, {stats.reconnects} reconnects",
+        stats.summary(), ok=stats.written > 0,
+    )
     if stats.written == 0:
         logger.error("Recorder wrote nothing — treating as failure, not as a quiet hour")
         return 1

@@ -25,6 +25,7 @@ import httpx
 
 from src.config import Settings
 from src.database import get_engine, verify_or_migrate
+from src.run_summary import write_summary
 from src.weather.calibration import Pair
 from src.weather.fitting import REFIT_WINDOW_DAYS, refit_cell
 from src.weather.mos import MosUnavailable, fetch_run
@@ -164,7 +165,14 @@ def main(argv=None) -> int:
     # than failing later with a raw driver error that says nothing about the fix.
     verify_or_migrate(engine, migrate=settings.MIGRATE_ON_BOOT, context="the weather refit job")
     summary = refit_all(engine, days=args.days, dry_run=args.dry_run)
-    return 0 if (summary["promoted"] or args.dry_run) else 1
+    ok = bool(summary["promoted"] or args.dry_run)
+    write_summary(
+        f"Weather refit: {len(summary['promoted'])} promoted, "
+        f"{len(summary['rejected'])} rejected, {len(summary['skipped'])} skipped",
+        "\n".join(summary["promoted"][:25]) or "no cells promoted",
+        ok=ok,
+    )
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

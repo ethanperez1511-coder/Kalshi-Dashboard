@@ -15,6 +15,7 @@ import sys
 
 from src.config import Settings
 from src.database import ensure_schema, get_engine, pending_schema_changes
+from src.run_summary import write_summary
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -49,6 +50,10 @@ def main(argv=None) -> int:
         logger.info("  - %s", item)
     added = ensure_schema(engine)
     logger.info("Migration complete. Added: %s", ", ".join(added) or "(tables only)")
+    write_summary(
+        f"Migration: {len(added)} column(s) added",
+        "\n".join(added) or "(new tables only)",
+    )
     return 0
 
 

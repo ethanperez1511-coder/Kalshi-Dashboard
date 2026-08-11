@@ -23,6 +23,7 @@ from src.recorder.health import format_recorder_health, recorder_health
 from src.digest_health import record_section
 from src.legacy_cutoff import mark_legacy_trades, resync_gate_counter
 from src.deployment_state import deployment_state, format_deployment_state
+from src.run_summary import write_summary
 from src.weather.fitting import guard_events
 from src.weather.stations import STATIONS
 from src.modeling.match_seed import apply_seed_decisions
@@ -137,6 +138,13 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     watching = [r for r in results if r["status"] == "watching"]
     rejected = [r for r in results if r["status"] == "rejected"]
     logger.info(f"Scored {len(results)} markets: {len(qualifying)} qualifying, {len(watching)} watching, {len(rejected)} rejected")
+    state = deployment_state(engine)
+    write_summary(
+        f"Cycle: {len(results)} scored, {len(qualifying)} qualifying | "
+        f"gate {state['gate_count']}/{state['gate_target']} | "
+        f"weather {state['weather_cells_priceable']}/{state['weather_cells_total']}",
+        format_deployment_state(state).replace("<b>", "").replace("</b>", ""),
+    )
 
     # Daily liveness heartbeat — fires even on idle (zero-trade) cycles, before the
     # early return below, so a healthy-but-quiet system is distinguishable from a dead one.

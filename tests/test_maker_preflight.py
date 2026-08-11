@@ -377,3 +377,46 @@ class TestLegacyCutoff:
                            quantity=3, current_price=85, status="open"))
             s.commit()
         assert suspect_open_positions(engine) == []
+
+
+# --------------------------------------------------------------------------
+# 6. Actions run summaries — production state readable without opening a log
+# --------------------------------------------------------------------------
+
+class TestRunSummary:
+    def test_writes_headline_and_commit(self, tmp_path, monkeypatch):
+        from src.run_summary import write_summary
+
+        target = tmp_path / "summary.md"
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(target))
+        monkeypatch.setenv("GITHUB_SHA", "e33ad46abcdef")
+        write_summary("Weather refit: 21 promoted", "KNYC/L1 BSS=0.581")
+
+        text = target.read_text()
+        assert "21 promoted" in text
+        assert "KNYC/L1" in text
+        assert "e33ad46a" in text
+        assert "✅" in text
+
+    def test_failure_is_marked_distinctly(self, tmp_path, monkeypatch):
+        """A green checkmark on a job that wrote zero rows is the failure the
+        summary exists to prevent."""
+        from src.run_summary import write_summary
+
+        target = tmp_path / "summary.md"
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(target))
+        write_summary("Book recorder: 0 messages", ok=False)
+        assert "❌" in target.read_text()
+
+    def test_no_op_outside_actions(self, monkeypatch):
+        from src.run_summary import write_summary
+
+        monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+        write_summary("nothing should happen")      # must not raise
+
+    def test_a_reporting_failure_never_fails_the_job(self, monkeypatch):
+        """Reporting on a job must not be able to break it."""
+        from src.run_summary import write_summary
+
+        monkeypatch.setenv("GITHUB_STEP_SUMMARY", "/nonexistent/dir/summary.md")
+        write_summary("headline")                   # must not raise
