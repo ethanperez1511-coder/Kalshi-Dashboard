@@ -21,6 +21,11 @@ Two traps this map exists to avoid:
 `ghcn_id` is the NCEI GHCN-Daily station, which carries the same official
 observation the CLI reports, but as a deep archive rather than a two-week
 window. It is the truth series for calibration.
+
+`mos_station` is the ICAO whose NWS MOS guidance is the production
+predictor. Central Park turned out to carry MEX MOS under its own KNYC
+identifier, so every series predicts from its own settlement site and no
+cross-site offset term is needed anywhere.
 """
 from __future__ import annotations
 
@@ -34,6 +39,7 @@ class Station:
     name: str          # as it appears in the contract rules
     cli_location: str  # NWS CLI product location code
     ghcn_id: str       # NCEI GHCN-Daily station id
+    mos_station: str   # ICAO for NWS MOS guidance (the production predictor)
     latitude: float
     longitude: float
     timezone: str      # settlement uses the LOCAL calendar day
@@ -46,32 +52,32 @@ class Station:
 STATIONS: Dict[str, Station] = {
     "KXHIGHNY": Station(
         "KXHIGHNY", "Central Park, New York", "NYC", "USW00094728",
-        40.7789, -73.9692, "America/New_York", "central park",
+        "KNYC", 40.7789, -73.9692, "America/New_York", "central park",
     ),
     "KXHIGHCHI": Station(
         # MIDWAY. Not O'Hare.
         "KXHIGHCHI", "Chicago Midway, IL", "MDW", "USW00014819",
-        41.7860, -87.7524, "America/Chicago", "midway",
+        "KMDW", 41.7860, -87.7524, "America/Chicago", "midway",
     ),
     "KXHIGHMIA": Station(
         "KXHIGHMIA", "Miami International Airport", "MIA", "USW00012839",
-        25.7932, -80.2906, "America/New_York", "miami international",
+        "KMIA", 25.7932, -80.2906, "America/New_York", "miami international",
     ),
     "KXHIGHDEN": Station(
         "KXHIGHDEN", "Denver, CO", "DEN", "USW00003017",
-        39.8467, -104.6562, "America/Denver", "denver",
+        "KDEN", 39.8467, -104.6562, "America/Denver", "denver",
     ),
     "KXHIGHAUS": Station(
         "KXHIGHAUS", "Austin Bergstrom", "AUS", "USW00013904",
-        30.1975, -97.6664, "America/Chicago", "austin bergstrom",
+        "KAUS", 30.1975, -97.6664, "America/Chicago", "austin bergstrom",
     ),
     "KXHIGHLAX": Station(
         "KXHIGHLAX", "Los Angeles Airport, CA", "LAX", "USW00023174",
-        33.9381, -118.3889, "America/Los_Angeles", "los angeles airport",
+        "KLAX", 33.9381, -118.3889, "America/Los_Angeles", "los angeles airport",
     ),
     "KXHIGHPHIL": Station(
         "KXHIGHPHIL", "Philadelphia International Airport", "PHL", "USW00013739",
-        39.8683, -75.2311, "America/New_York", "philadelphia international",
+        "KPHL", 39.8683, -75.2311, "America/New_York", "philadelphia international",
     ),
 }
 

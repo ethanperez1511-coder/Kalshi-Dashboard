@@ -29,3 +29,13 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 pythonpath = ["."]
+# Live tests hit real external APIs and need credentials. They are excluded
+# from the default run so a machine without secrets still gets a green suite —
+# but they are NOT allowed to skip themselves into invisibility. The scheduled
+# live-checks workflow runs `-m live` WITH credentials, where missing creds are
+# a hard failure, and tests/test_live_suite_wiring.py asserts that this whole
+# arrangement still exists and is wired to CI.
+addopts = "-m 'not live'"
+markers = [
+    "live: hits real external APIs; run by the scheduled live-checks workflow",
+]

@@ -1,0 +1,37 @@
+name: live-checks
+
+# Tests that hit real external APIs. Excluded from the default suite (which
+# must stay green without secrets), so they need somewhere to actually run —
+# otherwise marking them is indistinguishable from deleting them.
+#
+# Missing credentials here are a FAILURE, not a skip. These tests exist to
+# catch upstream contracts changing under us: a Kalshi series repointed at a
+# different settlement station would price a whole city against the wrong
+# observation, and nothing in the local suite can see that.
+on:
+  schedule:
+    - cron: "17 13 * * *"   # daily, after the US morning CLI products post
+  workflow_dispatch: {}
+
+concurrency:
+  group: live-checks
+  cancel-in-progress: false
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install ".[dev]"
+      - name: Run live suite
+        env:
+          # Read-only market data. None of these enable live trading — `mode`
+          # lives in the DB and defaults to paper.
+          KALSHI_API_KEY: ${{ secrets.KALSHI_API_KEY }}
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY_B64 }}
+        run: python -m pytest -m live -v

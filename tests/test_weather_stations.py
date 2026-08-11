@@ -56,30 +56,29 @@ class TestMapping:
         assert len(ids) == len(set(ids))
 
 
-def _offline() -> bool:
-    """Credentials live in .env, not the environment, so ask Settings.
-
-    Checking os.environ here silently skipped the guard on a machine that could
-    in fact reach the API — a guard that never runs is not a guard.
-    """
-    try:
-        from src.config import Settings
-
-        return Settings().is_offline_mode
-    except Exception:
-        return True
-
-
-@pytest.mark.skipif(_offline(), reason="needs live Kalshi credentials")
+@pytest.mark.live
 class TestAgainstLiveContracts:
-    """Guard: the mapping must keep matching what the contracts actually say."""
+    """Guard: the mapping must keep matching what the contracts actually say.
+
+    Marked `live` rather than skipped-if-credentials-missing. The earlier
+    version used `skipif`, which meant that on any machine without creds in the
+    environment the guard reported success while doing nothing — the failure
+    mode a guard exists to prevent. Now the default suite deselects it by
+    marker, the scheduled live-checks workflow runs it WITH credentials, and
+    missing credentials there are a hard failure rather than a skip.
+    """
 
     @pytest.mark.asyncio
     async def test_rules_text_still_names_the_mapped_station(self):
         from src.config import Settings
         from src.kalshi.client import KalshiClient
 
-        client = KalshiClient.from_settings(Settings())
+        settings = Settings()
+        assert not settings.is_offline_mode, (
+            "live suite ran without Kalshi credentials — this is a FAILURE, not "
+            "a skip: the station guard cannot verify anything without them"
+        )
+        client = KalshiClient.from_settings(settings)
         try:
             for ticker, station in STATIONS.items():
                 markets = await client.get_series_markets(ticker, max_markets=1)
