@@ -124,3 +124,30 @@ the same process reported the pre-migration shape.
 registries, model lists — needs an explicit load step and a test that asserts
 the enumeration is complete. Never let correctness depend on which modules
 happened to be imported first.
+
+## L11 — Smoke-test the write path, not just the read path.
+
+The forecast archive passed its unit tests and then wrote **zero** MOS rows on
+its first live run: MEX publishes twice daily and the code only asked for the 12Z
+run, which had not posted yet at that hour. Gridpoint wrote 56 rows in the same
+call, so the failure looked like a healthy run with a quiet source.
+
+**Rule:** for anything that accumulates history, run it for real once and assert
+the rows landed. Time-of-day and publication-schedule assumptions do not show up
+in a mocked test, and an archive that silently records nothing is indistinguishable
+from one that had nothing to record — until months later when the history is
+needed and is not there.
+
+## L12 — Diagnose the shape of a failure before proposing a fix.
+
+One cell failed its reliability bar. The tempting move is to widen the bar or
+refit and re-run. Instead: check whether degradation is uniform (model-level) or
+patterned (data-level). It ordered exactly by station seasonality, and the sign
+of (fitted sigma - realized sigma) predicted the direction of every miss in both
+directions. That made it a stale-fit story, which has a specific remedy — a
+rolling window — rather than a vague one.
+
+**Rule:** when a gate fails, first establish whether the failure is uniform or
+structured. A structured failure names its own fix; a uniform one means the model
+is wrong. Never move the bar to make the failure go away, and never adopt a
+remedy without re-running the unchanged gate on fresh held-out data.

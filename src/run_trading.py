@@ -17,6 +17,8 @@ from src.ev.calculator import EVResult
 from src.ev.scorer import score_all_markets
 from src.kalshi.client import KalshiClient
 from src.ingestion.series_ingest import coverage_from_db
+from src.weather.archive import run_daily_archive
+from src.weather.digest import format_weather_digest, weather_digest
 from src.modeling.match_seed import apply_seed_decisions
 from src.portfolio.attribution import trades_by_model
 from src.models.settings import TradingSettings
@@ -60,6 +62,15 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     # Human match verdicts live in the repo so they reach Neon, which is only
     # writable from this runner. Idempotent; never overrides a dashboard decision.
     apply_seed_decisions(engine)
+
+    # Record today's forecasts whether or not anything trades. A day not
+    # archived cannot be reconstructed, and the migration off the third-party
+    # MOS archive depends entirely on this history existing.
+    if not settings.is_offline_mode:
+        try:
+            run_daily_archive(engine)
+        except Exception:
+            logger.warning("Forecast archive failed (non-fatal)", exc_info=True)
 
     # Ensure trading settings exist (bankroll=$100, paper mode)
     ts = TradingSettings.get_or_create(engine)
@@ -110,6 +121,7 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
             ts.bankroll, ts.paper_trade_count, ts.paper_trades_before_live,
             coverage=coverage_from_db(engine),
             per_model=trades_by_model(engine),
+            weather=format_weather_digest(weather_digest(engine)),
         )
         TradingSettings.record_heartbeat(engine)
 

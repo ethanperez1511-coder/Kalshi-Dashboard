@@ -69,6 +69,7 @@ class Alerter:
         total: int,
         coverage: dict = None,
         per_model: dict = None,
+        weather: str = "",
     ) -> None:
         """Daily liveness ping, carrying the two coverage facts worth waking to.
 
@@ -98,6 +99,8 @@ class Alerter:
             )
             lines.append(f"🧩 Paper trades by model: {breakdown or 'none attributed'}")
 
+        if weather:
+            lines.append(weather)
         lines.append("(daily heartbeat)")
         self.send("\n".join(lines))
 

@@ -8,6 +8,7 @@ from src.modeling.models.finance import FinanceModel
 from src.modeling.models.polymarket import PolymarketModel
 from src.modeling.models.sports import SportsModel
 from src.modeling.models.sports_odds import SportsOddsModel
+from src.weather.model import WeatherModel
 from src.modeling.odds_api import OddsClient
 
 
@@ -22,6 +23,7 @@ class ModelRegistry:
         self._fallback: BaseModel = ConsensusModel()
         self._specialized: List[BaseModel] = [
             SportsOddsModel(odds_client),  # external odds first
+            WeatherModel(),                # calibrated NWS MOS guidance
             PolymarketModel(),
             FinanceModel(),
             SportsModel(),
