@@ -62,6 +62,27 @@ class WeatherCellFit(Base):
     )
 
 
+class GuardState(Base):
+    """Last known pause state per cell, so transitions can be detected.
+
+    Without persistence the pipeline cannot tell "paused" from "paused since
+    yesterday", and a cell flapping in and out of pause every few cycles is
+    exactly the signal worth seeing — it means the threshold is sitting on top
+    of the live Brier rather than safely away from it.
+    """
+
+    __tablename__ = "guard_state"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    scope: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    paused: Mapped[bool] = mapped_column(Boolean, default=False)
+    last_brier: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
+    transitions: Mapped[int] = mapped_column(Integer, default=0)
+    changed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
+
+
 class ForecastArchive(Base):
     """One forecast, recorded the day we saw it.
 

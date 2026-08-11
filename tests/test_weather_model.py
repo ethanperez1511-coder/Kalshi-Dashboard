@@ -317,3 +317,79 @@ def test_each_refusal_reports_its_own_reason(engine):
     stale = dict(fresh, fitted_at=now - dt.timedelta(days=MAX_FIT_AGE_DAYS + 2))
     assert "days old" in cell_priceable(
         StoredFit(promoted=True, n_eval_pairs=105, **stale))[1]
+
+
+# --------------------------------------------------------------------------
+# 7. Guard transitions — flapping must be visible without reading the digest
+# --------------------------------------------------------------------------
+
+class TestGuardEvents:
+    def _settle(self, engine, n, p_model, won, series="KXHIGHNY"):
+        with get_session(engine) as s:
+            for i in range(n):
+                s.add(Trade(
+                    market_id=f"{series}-26AUG{i:02d}-T90", side="yes", action="buy",
+                    price=50, quantity=1, p_model=p_model, implied_prob=0.5,
+                    edge=0.1, net_ev=0.05, position_size_dollars=0.5,
+                    confidence=0.8, reasoning="t", is_paper=True, status="closed",
+                    realized_pnl=(1.0 if won else -1.0), model_name="WeatherModel",
+                ))
+            s.commit()
+
+    def test_no_event_while_state_is_unchanged(self, engine):
+        from src.weather.fitting import guard_events
+
+        assert guard_events(engine, ["KXHIGHNY"]) == []
+        assert guard_events(engine, ["KXHIGHNY"]) == []
+
+    def test_pause_raises_one_event_carrying_the_brier(self, engine):
+        from src.weather.fitting import guard_events
+
+        self._settle(engine, GUARD_MIN_SETTLED, 0.95, won=False)
+        events = guard_events(engine, ["KXHIGHNY"])
+        assert len(events) == 1
+        assert events[0]["paused"] is True
+        assert events[0]["brier"] > GUARD_MAX_BRIER
+        assert events[0]["transitions"] == 1
+
+    def test_pause_is_not_re_announced_every_cycle(self, engine):
+        from src.weather.fitting import guard_events
+
+        self._settle(engine, GUARD_MIN_SETTLED, 0.95, won=False)
+        assert len(guard_events(engine, ["KXHIGHNY"])) == 1
+        assert guard_events(engine, ["KXHIGHNY"]) == []
+
+    def test_resume_raises_its_own_event(self, engine):
+        from src.weather.fitting import guard_events
+
+        self._settle(engine, GUARD_MIN_SETTLED, 0.95, won=False)
+        guard_events(engine, ["KXHIGHNY"])
+        # Newer, good trades push the bad ones out of the rolling window.
+        self._settle(engine, GUARD_MIN_SETTLED, 0.9, won=True)
+        events = guard_events(engine, ["KXHIGHNY"])
+        assert len(events) == 1
+        assert events[0]["paused"] is False
+        assert events[0]["transitions"] == 2
+
+    def test_transitions_accumulate_so_flapping_is_visible(self, engine):
+        """A cell crossing repeatedly means the threshold sits on top of live
+        skill — a different problem from one that failed once and stayed."""
+        from src.weather.fitting import guard_events
+
+        for _ in range(2):
+            self._settle(engine, GUARD_MIN_SETTLED, 0.95, won=False)
+            guard_events(engine, ["KXHIGHNY"])
+            self._settle(engine, GUARD_MIN_SETTLED, 0.9, won=True)
+            guard_events(engine, ["KXHIGHNY"])
+
+        from src.database import get_session as gs
+        from src.models.weather import GuardState
+        with gs(engine) as s:
+            assert s.query(GuardState).filter_by(scope="KXHIGHNY").first().transitions >= 4
+
+    def test_events_are_per_series(self, engine):
+        from src.weather.fitting import guard_events
+
+        self._settle(engine, GUARD_MIN_SETTLED, 0.95, won=False, series="KXHIGHDEN")
+        events = guard_events(engine, ["KXHIGHNY", "KXHIGHDEN"])
+        assert [e["series"] for e in events] == ["KXHIGHDEN"]

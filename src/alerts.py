@@ -104,6 +104,33 @@ class Alerter:
         lines.append("(daily heartbeat)")
         self.send("\n".join(lines))
 
+    def guard_event(
+        self, series: str, paused: bool, brier, settled: int, transitions: int,
+    ) -> None:
+        """A cell pausing or resuming, with the number that moved it.
+
+        Sent as it happens rather than left to the daily digest: a cell that
+        pauses and resumes repeatedly is telling you the threshold sits on top
+        of the live Brier, and that is only visible if each crossing is seen.
+        """
+        label = series.replace("KXHIGH", "")
+        value = f"{brier:.3f}" if brier is not None else "n/a"
+        if paused:
+            self.send(
+                f"⛔ <b>CELL PAUSED</b> — {label}\n"
+                f"Trailing Brier {value} over last {settled} settled trades "
+                f"(blind 0.5 scores 0.250).\n"
+                f"Model stops pricing this station. Transition #{transitions}."
+            )
+        else:
+            self.send(
+                f"✅ <b>CELL RESUMED</b> — {label}\n"
+                f"Trailing Brier {value} back within tolerance "
+                f"({settled} settled). Transition #{transitions}."
+                + ("\n⚠️ Flapping — threshold may sit on top of live skill."
+                   if transitions >= 4 else "")
+            )
+
     def error(self, msg: str) -> None:
         self.send(f"🚨 PIPELINE ERROR\n<code>{msg[:300]}</code>")
 

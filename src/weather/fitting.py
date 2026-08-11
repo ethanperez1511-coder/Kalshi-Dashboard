@@ -279,3 +279,54 @@ def refit_cell(
         station, lead_days, bss, slope, verdict.promoted, skipped,
     )
     return load_fit(engine, station, lead_days, predictor)
+
+
+# --------------------------------------------------------------------------
+# guard transitions
+# --------------------------------------------------------------------------
+
+def sync_guard_state(engine: Engine, scope: str, paused: bool, brier: Optional[float]):
+    """Record the current pause state and report whether it just changed.
+
+    Returns (changed, transitions). Transitions accumulate so flapping is
+    visible: a cell crossing the threshold repeatedly means the bar is sitting
+    on top of the live Brier rather than safely away from it, and that is a
+    different problem from a cell that failed once and stayed failed.
+    """
+    from src.models.weather import GuardState
+
+    with get_session(engine) as session:
+        row = session.query(GuardState).filter_by(scope=scope).first()
+        if row is None:
+            row = GuardState(scope=scope, paused=False, transitions=0)
+            session.add(row)
+            session.flush()
+
+        changed = bool(row.paused) != bool(paused)
+        if changed:
+            row.paused = paused
+            row.transitions = (row.transitions or 0) + 1
+            row.changed_at = dt.datetime.now(dt.timezone.utc)
+        row.last_brier = brier
+        transitions = row.transitions or 0
+        session.commit()
+    return changed, transitions
+
+
+def guard_events(engine: Engine, series_tickers) -> List[dict]:
+    """Pause/unpause transitions since the last cycle, ready to alert on."""
+    events: List[dict] = []
+    for series in series_tickers:
+        paused, reason = guard_paused(engine, series)
+        value, n = live_brier(engine, series)
+        changed, transitions = sync_guard_state(engine, series, paused, value)
+        if changed:
+            events.append({
+                "series": series,
+                "paused": paused,
+                "brier": value,
+                "settled": n,
+                "transitions": transitions,
+                "reason": reason,
+            })
+    return events

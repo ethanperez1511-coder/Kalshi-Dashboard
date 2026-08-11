@@ -1,0 +1,44 @@
+name: weather-refit
+
+# Refits every weather cell and re-runs the unchanged promotion gate.
+#
+# Runs on a schedule rather than on the trading path: the validated design
+# refits on a trailing 90-day window before pricing, and `cell_priceable`
+# refuses any fit older than its 7-day cadence. So if this workflow stops
+# running, cells go UNPRICEABLE rather than quietly pricing off stale
+# parameters — the failure is loud by construction.
+on:
+  schedule:
+    - cron: "40 6 * * 1"     # weekly, Monday, well inside the 7-day cadence
+  workflow_dispatch: {}
+
+concurrency:
+  group: weather-refit
+  cancel-in-progress: false
+
+jobs:
+  refit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45      # ~1700 IEM requests; the archive throttles
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install .
+      - name: Apply pending schema migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.migrate
+      - name: Refit weather cells
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.weather.refit_job --days 240
+      - name: Alert on failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python -m src.alert_live_failure

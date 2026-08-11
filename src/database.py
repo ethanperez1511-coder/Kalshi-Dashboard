@@ -45,8 +45,27 @@ def _add_column_ddl(engine: Engine, column: Column) -> Optional[str]:
     type_sql = column.type.compile(engine.dialect)
     ddl = f"{column.name} {type_sql}"
     if column.server_default is not None:
-        ddl += f" DEFAULT {column.server_default.arg}"
+        ddl += f" DEFAULT {_literal_default(column.server_default.arg)}"
     return ddl
+
+
+def _literal_default(value) -> str:
+    """Render a server default as SQL, quoting strings.
+
+    Emitting it raw produced `DEFAULT n/a` for a string default, which is a
+    syntax error — and would have been one on Postgres too, so the migration
+    would have failed on the next deploy rather than only locally.
+    """
+    from sqlalchemy.sql.elements import TextClause
+
+    if isinstance(value, TextClause):
+        return str(value.text)
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, (int, float)):
+        return str(value)
+    escaped = str(value).replace("'", "''")
+    return f"'{escaped}'"
 
 
 def load_all_models() -> None:

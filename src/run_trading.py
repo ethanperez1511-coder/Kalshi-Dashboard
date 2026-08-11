@@ -19,6 +19,8 @@ from src.kalshi.client import KalshiClient
 from src.ingestion.series_ingest import coverage_from_db
 from src.weather.archive import run_daily_archive
 from src.weather.digest import format_weather_digest, weather_digest
+from src.weather.fitting import guard_events
+from src.weather.stations import STATIONS
 from src.modeling.match_seed import apply_seed_decisions
 from src.portfolio.attribution import trades_by_model
 from src.models.settings import TradingSettings
@@ -98,6 +100,18 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     if ts.mode == "live" and kalshi_client is not None:
         sync_live_bankroll(engine, kalshi_client)
         ts = TradingSettings.get_or_create(engine)
+
+    # Guard transitions are alerted as they happen. Left to the daily digest,
+    # a cell that pauses and resumes repeatedly would look identical to one
+    # that never moved.
+    try:
+        for event in guard_events(engine, list(STATIONS.keys())):
+            alerter.guard_event(
+                event["series"], event["paused"], event["brier"],
+                event["settled"], event["transitions"],
+            )
+    except Exception:
+        logger.warning("Guard event check failed (non-fatal)", exc_info=True)
 
     # Step 1: Score all markets
     logger.info("=== Scoring markets ===")

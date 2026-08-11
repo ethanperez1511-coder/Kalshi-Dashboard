@@ -28,6 +28,29 @@ class TruthUnavailable(RuntimeError):
     """No realized observation. Never substitute an estimate for one."""
 
 
+def _fetch_via_curl(ghcn_id: str, params: dict, timeout: float):
+    """Last-resort fetch for hosts where httpx stalls on NCEI."""
+    import json
+    import subprocess
+    import urllib.parse
+
+    url = f"{_NCEI_URL}?{urllib.parse.urlencode(params)}"
+    try:
+        result = subprocess.run(
+            ["curl", "-s", "--max-time", str(int(timeout)),
+             "-H", "User-Agent: kalshi-trading-bot (research)", url],
+            capture_output=True, text=True, timeout=timeout + 15,
+        )
+    except Exception as exc:
+        raise TruthUnavailable(f"{ghcn_id}: NCEI curl fallback failed: {exc}") from exc
+    if result.returncode != 0 or not result.stdout.strip():
+        raise TruthUnavailable(f"{ghcn_id}: NCEI curl fallback returned nothing")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise TruthUnavailable(f"{ghcn_id}: NCEI curl fallback non-JSON") from exc
+
+
 def fetch_daily_max(
     ghcn_id: str,
     start: dt.date,
@@ -41,31 +64,37 @@ def fetch_daily_max(
     genuine gaps, and inventing a value for one would be fabricating the
     outcome a model is scored against.
     """
+    params = {
+        "dataset": "daily-summaries",
+        "stations": ghcn_id,
+        "startDate": start.isoformat(),
+        "endDate": end.isoformat(),
+        "dataTypes": "TMAX",
+        "units": "standard",
+        "format": "json",
+    }
+
+    rows = None
     try:
         response = http.get(
-            _NCEI_URL,
-            params={
-                "dataset": "daily-summaries",
-                "stations": ghcn_id,
-                "startDate": start.isoformat(),
-                "endDate": end.isoformat(),
-                "dataTypes": "TMAX",
-                "units": "standard",
-                "format": "json",
-            },
+            _NCEI_URL, params=params,
             headers={"User-Agent": "kalshi-trading-bot (research)"},
             timeout=timeout,
         )
-    except Exception as exc:
-        raise TruthUnavailable(f"{ghcn_id}: NCEI request failed: {exc}") from exc
-
-    if response.status_code != 200:
-        raise TruthUnavailable(f"{ghcn_id}: NCEI HTTP {response.status_code}")
-
-    try:
+        if response.status_code != 200:
+            raise TruthUnavailable(f"{ghcn_id}: NCEI HTTP {response.status_code}")
         rows = response.json()
+    except TruthUnavailable:
+        raise
     except Exception as exc:
-        raise TruthUnavailable(f"{ghcn_id}: NCEI returned non-JSON") from exc
+        # Observed repeatedly: httpx hangs against this endpoint on some hosts
+        # where curl returns the same full range in under two seconds. Rather
+        # than let a client-library quirk decide whether the model has a truth
+        # series, fall back and say so.
+        logger.warning(
+            "NCEI via httpx failed for %s (%s) — retrying with curl", ghcn_id, exc,
+        )
+        rows = _fetch_via_curl(ghcn_id, params, timeout)
     if not isinstance(rows, list):
         raise TruthUnavailable(f"{ghcn_id}: unexpected NCEI payload {str(rows)[:120]}")
 
