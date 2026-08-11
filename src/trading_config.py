@@ -154,6 +154,25 @@ POLYMARKET_MAX_HORIZON_GAP_DAYS: int = _env_int(
     "TRADING_POLYMARKET_MAX_HORIZON_GAP_DAYS", 90
 )
 
+# --- Phase 2.0: series-targeted ingest ---
+# Daily weather contracts are invisible to both existing feeds. Measured
+# 2026-08-11: the first 3000 rows of /markets are 1549 General + 1451 Sports
+# with zero weather tickers, and the events feed carries only long-horizon
+# climate markets. They exist solely behind an explicit series_ticker query.
+#
+# Config-driven, not hardcoded to the cities that happened to be probed. The
+# fetch runs on its own call path and does not touch MARKET_FETCH_CAP or the
+# odds quota. Ingesting is not trading — nothing here can place an order.
+INGEST_SERIES_TICKERS: str = _env_str(
+    "TRADING_INGEST_SERIES_TICKERS",
+    "KXHIGHNY,KXHIGHCHI,KXHIGHMIA,KXHIGHDEN,KXHIGHAUS,KXHIGHLAX,KXHIGHPHIL",
+)
+SERIES_FETCH_CAP: int = _env_int("TRADING_SERIES_FETCH_CAP", 500)
+
+
+def ingest_series_list() -> list:
+    return [s.strip() for s in INGEST_SERIES_TICKERS.split(",") if s.strip()]
+
 # --- Pre-live hardening: stale data guard ---
 # Never score a market whose latest price snapshot is older than this.
 # A market that stops getting fresh snapshots has closed early or fallen out

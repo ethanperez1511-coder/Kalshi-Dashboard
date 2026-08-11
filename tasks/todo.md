@@ -395,6 +395,158 @@ A wrong match is fabricated data pointed straight at the sizing engine. Highest 
 3. ESPN: probe the live endpoint first. Build EspnOddsSource only if moneyline is genuinely
    carried for MLB/NBA/NHL; otherwise ship the OddsSource interface + NullSource and report it.
 
+# PHASE 2 — Weather model (2026-08-11) — PLAN, NOT YET IMPLEMENTED
+
+Requirement from the user, up front: the ensemble-spread-to-probability conversion must be
+validated against realized outcomes on historical data BEFORE the weather model may carry any
+confidence above the price-derived tier. A miscalibrated weather model looks exactly like edge
+until it settles. Calibration evidence goes in the Phase 2 report.
+
+## Findings that reshape this phase (verified live, 2026-08-11)
+
+### F1. We do not ingest weather markets AT ALL. The model would have nothing to score.
+- `/markets` first 3000 (the MARKET_FETCH_CAP): categories are General 1549 / Sports 1451.
+  **Zero** weather tickers.
+- `/events` feed, 2000 markets: "Climate and Weather" = 26 rows, all long-horizon
+  (`KXWARMING-50`, `USCLIMATE-2030`, supervolcano/earthquake). **Zero** daily temperature.
+- The local DB's 23 "Climate and Weather" rows are all of that long-horizon kind.
+- The daily markets exist and are reachable ONLY by explicit series query:
+  `GET /markets?series_ticker=KXHIGHNY` →
+  `KXHIGHNY-26AUG12-T90 | close 2026-08-13T04:59Z | "Will the high temp in NYC be >90° on Aug 12"`
+  Confirmed live for KXHIGHNY, KXHIGHCHI, KXHIGHMIA, KXHIGHDEN, KXHIGHAUS, KXHIGHLAX,
+  KXHIGHPHIL (5 open markets each). KXRAINNYC: 0 open.
+- So Phase 2 needs a targeted series-ingest path before any modelling. This is the prerequisite.
+
+### F2. Thresholds come in BOTH directions.
+Austin's example is "**<**99°" while NYC's is "**>**90°". A parser that assumes `>` inverts the
+question — the same class of failure as the Polymarket direction bug in Phase 1.3.
+
+### F3. Daily markets make close_time load-bearing.
+These close ~05:00Z the following day. The 14-day expiry filter and the 30-minute stale-snapshot
+guard both key off dates that, for these contracts, turn over every single day.
+
+## Tasks — 2.0 prerequisite: reach the markets
+- [ ] Series-targeted ingest: `KalshiClient.get_series_markets(series_ticker)`, config
+      `TRADING_WEATHER_SERIES` (the 7 confirmed tickers), wired into live_ingest alongside the
+      existing feeds. Flagged, default ON for ingest only — ingesting is not trading.
+- [ ] Ticker parser → (city, date, threshold_f, direction). Round-trip tested against real
+      tickers, including the `<` variant. Unparseable ticker → no estimate, never a guess.
+- [ ] City → (lat/lon, NWS settlement station) map, from the contract rules text, not assumed.
+
+## Tasks — 2.1 data layer (free, no key)
+- [ ] Open-Meteo ensemble client → members for daily max temp. DB-cached like odds
+      (cron = fresh process every 5 min; a module cache is inert — lesson L3).
+- [ ] Realized-outcome client for scoring (NWS station observations; Open-Meteo archive as the
+      bulk source if parity holds — see 2.3).
+- [ ] Open-Meteo publishes a free-tier daily call limit; budget against it with the same
+      ledger pattern as the odds quota.
+
+## Tasks — 2.2 model
+- [ ] Ensemble members → empirical CDF → P(max temp beats threshold), respecting direction.
+- [ ] Calibration layer. Raw ensembles are known to be under-dispersed, which produces
+      overconfident tail probabilities — precisely the failure that reads as edge. Plan is
+      NGR/EMOS (μ = a + b·ens_mean, σ² = c + d·ens_var) fitted on historical pairs, walk-forward.
+- [ ] Coherence check, free from the market structure: within one city-day the thresholds are
+      ordered, so P must be monotone across them. A violation means the model is broken; assert it.
+
+## Tasks — 2.3 calibration validation — THE GATE
+- [ ] Build a (forecast at lead time L, realized outcome) dataset over N past days × 7 cities.
+      Feasibility is being probed now; the honest fork:
+      (a) historical ENSEMBLE forecasts retrievable → fit and validate NGR properly;
+      (b) only deterministic historical forecasts → validate a spread proxy, and say plainly in
+          the report that dispersion is estimated rather than observed;
+      (c) neither → the model does NOT get promoted, and ships confidence-capped at the
+          price-derived tier (i.e. untradeable) with that stated as the reason.
+- [ ] LOOKAHEAD IS THE MAIN RISK. Reanalysis may be used ONLY as the outcome, never as an
+      input. Calibration fitted strictly on data preceding each evaluation window. Audit this
+      explicitly and show the audit.
+- [ ] Metrics: Brier score, Brier skill score vs a climatology baseline, reliability diagram
+      (bucketed predicted-p vs realized frequency), PIT histogram, CRPS.
+- [ ] Promotion rule, encoded in code not prose: confidence stays at the price-derived tier
+      until BSS > 0 vs climatology AND the reliability slope is within tolerance on HELD-OUT
+      data. Config `WEATHER_CONFIDENCE_PROMOTED` default OFF; the report carries the evidence.
+
+## Tasks — 2.4 settlement parity (silent edge-killer)
+- [ ] Kalshi settles on a specific official station observation. If we model a grid value that
+      differs from that station by even ~1°F, every threshold near the line is mispriced while
+      looking correct. Measure the discrepancy over a real sample; if material, model the
+      station series directly rather than the grid.
+
+## Safety statement (per CLAUDE.md)
+- No task touches `mode`, the 50-trade gate, or `can_trade_live()`.
+- Risk ceilings untouched; the weather model is an input to the existing EV filter and risk
+  layer, not a bypass of either.
+- Fails safe: unparseable ticker, missing ensemble, failed coherence check, or unvalidated
+  calibration all produce NO estimate rather than a substituted number.
+- New capability ships behind flags default OFF (lesson L5); the ingest path is the exception
+  and is ingest-only.
+
+## Carried decisions (recorded so they cannot be lost)
+
+### Polymarket re-entry is the arb scanner, not the price model
+Phase 1.5 took Polymarket coverage to zero: every matched pair failed on resolution horizon.
+The re-entry path is the Phase 2 cross-exchange arb scanner, under these restrictions:
+- **Event-dated contracts only** — game dates, election dates. The horizon-convention gap that
+  killed the price model exists precisely where the "event" is open-ended ("next PM, ever"). It
+  cannot exist when both venues resolve on one dated real-world occurrence.
+- **Verify resolution-date agreement explicitly, per pair.** Not a category assumption, not a
+  series-level rule: each pair proves its two contracts settle on the same dated event before it
+  is eligible. Same discipline as the entity check, applied to dates.
+- Exact entity match only, no fuzzy — an arb position is exposed on BOTH legs, so a wrong match
+  loses twice rather than being merely uninformative.
+- Reminder from the Swift ruling: same event + same date is still not enough if the two venues
+  use different evidentiary standards. The arb scanner needs the resolution-criteria check too.
+
+### Per-model trade counts (implemented in 2.0)
+With Polymarket at zero and the price-derived models gated off, the paper sample is
+SportsOdds-only. The 50-trade gate counts trades, not evidence, so it can read 50/50 while every
+other model has zero settled trades — "validated" about a system validated in one corner.
+`src/portfolio/attribution.py` now tracks placed and settled counts per model, surfaced in the
+daily digest, and `models_without_settled_evidence()` names the models the record cannot speak
+for. **Enforcing a per-model minimum before live is a policy decision and is NOT implemented** —
+flagging it rather than quietly changing what the gate means.
+
+## Review — 2.0 COMPLETE 2026-08-11
+
+Suite: **389 passed** (357 → 389, 32 new). Verified end to end against the live Kalshi API.
+
+**Series ingest.** `get_series_markets()` on its own call path; config-driven via
+`TRADING_INGEST_SERIES_TICKERS` (7 cities as the default, not hardcoded); own `SERIES_FETCH_CAP`,
+so it touches neither `MARKET_FETCH_CAP` nor the odds quota. One failing series is caught and the
+rest continue; an empty series is distinguishable from a failed one.
+
+**Terms parsed, never assumed.** Kalshi publishes `strike_type` + `floor_strike`/`cap_strike`, so
+those are the source of truth, with the human-readable subtitle as an independent cross-check.
+Stored explicitly on the market row (`strike_direction`, `strike_value`, `strike_unit`,
+`terms_status`). Direction is per-CONTRACT: NYC lists both `>90°` and `<83°` for the same day, so
+the earlier "Austin is a < city" framing was wrong and a per-city rule would have mispriced half
+the book.
+
+**Boundary semantics.** `floor_strike=90` + subtitle "91° or above" ⇒ YES iff T ≥ 91, i.e.
+STRICTLY greater. Both directions strict, and the subtitle cross-check rejects any contract whose
+text implies a different convention — an off-by-one here moves mass at the money.
+
+**Refusal over defaulting.** Unreadable → `terms_status="unparsed"`, direction and value stay
+NULL. Structured terms that exist but cannot be used never fall back to the title: if the API
+says `between` and the title says ">90°", the title is a lossy summary and using it would price a
+range contract as one-sided.
+
+**Live evidence (2026-08-11):** 84 contracts fetched across 7 series → 28 priceable
+(14 above / 14 below), 56 unsupported, **0 unreadable**, 100% of readable contracts parsed.
+
+**Finding that changes 2.1 scope.** 56 of 84 live contracts are `between` buckets. Each city-day
+is a complete partition: `<84`, `[84,85]`, `[86,87]`, `[88,89]`, `[90,91]`, `>91`. Two consequences:
+- One-sided thresholds are only ~33% of the book; interval support is where the coverage is.
+- The partition sums to 1, which is a far stronger model-integrity check than the monotonicity
+  test originally planned — and it is free.
+Initially these were counted as parse failures, which made the coverage metric lie (a modelling
+gap reported as a broken parser). Now a distinct `TERMS_UNSUPPORTED` state.
+
+## Review
+_(filled after implementation, with the calibration evidence)_
+
+---
+
 ## Review — COMPLETE 2026-08-11 (full detail in PHASE_1_REPORT.md)
 
 Suite: **325 passed** (250 before, 75 new). Frontend `tsc --noEmit` clean. FastAPI boots with

@@ -96,6 +96,43 @@ class KalshiClient:
         logger.info(f"Fetched {len(all_markets)} total markets (cap={max_markets})")
         return all_markets
 
+    async def get_series_markets(
+        self,
+        series_ticker: str,
+        status: str = "open",
+        limit: int = 200,
+        max_markets: int = 500,
+    ) -> List[KalshiMarket]:
+        """Every open market in one series, fetched by explicit series query.
+
+        Some series are reachable no other way. The general `/markets` walk is
+        dominated by sports parlays — measured 2026-08-11, the first 3000 rows
+        held 1549 General + 1451 Sports and zero weather contracts — and the
+        `/events` feed surfaces only long-horizon climate markets. Daily
+        temperature contracts exist solely behind `series_ticker`.
+
+        A separate call path on purpose: it neither consumes nor perturbs the
+        general ingest's fetch cap.
+        """
+        markets: List[KalshiMarket] = []
+        cursor = ""
+        while len(markets) < max_markets:
+            params: dict = {
+                "series_ticker": series_ticker, "status": status, "limit": limit,
+            }
+            if cursor:
+                params["cursor"] = cursor
+            response = await self._request("GET", "/markets", params=params)
+            data = KalshiMarketsResponse(**response.json())
+            if not data.markets:
+                break
+            markets.extend(data.markets)
+            cursor = data.cursor
+            if not cursor:
+                break
+        logger.info(f"Series {series_ticker}: {len(markets)} open markets")
+        return markets[:max_markets]
+
     async def get_event_markets(
         self,
         exclude_categories: tuple = ("Sports",),

@@ -16,7 +16,9 @@ from src.ingestion.live_ingest import ingest_live_markets
 from src.ev.calculator import EVResult
 from src.ev.scorer import score_all_markets
 from src.kalshi.client import KalshiClient
+from src.ingestion.series_ingest import coverage_from_db
 from src.modeling.match_seed import apply_seed_decisions
+from src.portfolio.attribution import trades_by_model
 from src.models.settings import TradingSettings
 from src.portfolio.tracker import PortfolioTracker
 from src.risk.manager import RiskManager
@@ -104,7 +106,11 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     # Daily liveness heartbeat — fires even on idle (zero-trade) cycles, before the
     # early return below, so a healthy-but-quiet system is distinguishable from a dead one.
     if TradingSettings.heartbeat_due(engine):
-        alerter.heartbeat(ts.bankroll, ts.paper_trade_count, ts.paper_trades_before_live)
+        alerter.heartbeat(
+            ts.bankroll, ts.paper_trade_count, ts.paper_trades_before_live,
+            coverage=coverage_from_db(engine),
+            per_model=trades_by_model(engine),
+        )
         TradingSettings.record_heartbeat(engine)
 
     for r in results:
@@ -162,6 +168,7 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
             reasoning=opp.get("reasoning", "auto-scored"),
             yes_bid=opp.get("yes_bid", 0),
             yes_ask=opp.get("yes_ask", 0),
+            model_name=opp.get("model_name", ""),
         )
 
         if result:

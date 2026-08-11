@@ -39,6 +39,13 @@ class Trade(Base):
     entry_fee_source: Mapped[Optional[str]] = mapped_column(
         String(20), nullable=True, default=None
     )
+    # Which model produced the estimate behind this trade. Without it the
+    # 50-trade paper gate can be satisfied entirely by one model while every
+    # other has zero settled evidence — the count would say "validated" about a
+    # system that is only validated in one corner.
+    model_name: Mapped[Optional[str]] = mapped_column(
+        String(60), nullable=True, default=None, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

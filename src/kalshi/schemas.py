@@ -15,6 +15,17 @@ class KalshiMarket(BaseModel):
     status: str
     rules_primary: str = ""
     event_ticker: str = ""
+    # Structured contract terms. For threshold markets Kalshi publishes the
+    # direction and the strike separately, which is the only non-guessing way
+    # to tell ">90°" from "<83°" — the same city lists both on the same day.
+    strike_type: str = ""              # "greater" | "less" | "between" | ...
+    floor_strike: Optional[float] = None
+    cap_strike: Optional[float] = None
+    # Human-readable resolution ("91° or above"). Carries the boundary
+    # convention the structured fields leave implicit, so it serves as a
+    # cross-check rather than as the primary source.
+    subtitle: str = ""
+    yes_sub_title: str = ""
     # API returns dollars as strings; we convert to integer cents internally.
     yes_bid: int = 0
     yes_ask: int = 0

@@ -62,11 +62,44 @@ class Alerter:
             f"Trades: {trades} | Bankroll: ${bankroll:.2f} | Paper: {paper_count}/50"
         )
 
-    def heartbeat(self, bankroll: float, paper_count: int, total: int) -> None:
-        self.send(
-            f"✅ Alive — bankroll ${bankroll:.2f} | "
-            f"paper {paper_count}/{total} | (daily heartbeat)"
-        )
+    def heartbeat(
+        self,
+        bankroll: float,
+        paper_count: int,
+        total: int,
+        coverage: dict = None,
+        per_model: dict = None,
+    ) -> None:
+        """Daily liveness ping, carrying the two coverage facts worth waking to.
+
+        `coverage` answers "of the threshold contracts that exist, how many can
+        we actually price?" A parser that quietly stops reading them looks
+        identical to a quiet market otherwise.
+
+        `per_model` answers "what is the paper record actually made of?" A 50/50
+        gate reached entirely by one model says "validated" about a system that
+        is only validated in one corner.
+        """
+        lines = [f"✅ Alive — bankroll ${bankroll:.2f} | paper {paper_count}/{total}"]
+
+        if coverage:
+            priceable = coverage.get("priceable", 0)
+            unreadable = coverage.get("unreadable", 0)
+            if priceable or unreadable:
+                line = f"📊 Threshold contracts: {priceable}/{priceable + unreadable} priceable"
+                if unreadable:
+                    line += f" — ⚠️ {unreadable} unreadable"
+                lines.append(line)
+
+        if per_model is not None:
+            breakdown = ", ".join(
+                f"{name} {count}"
+                for name, count in sorted(per_model.items(), key=lambda kv: -kv[1])
+            )
+            lines.append(f"🧩 Paper trades by model: {breakdown or 'none attributed'}")
+
+        lines.append("(daily heartbeat)")
+        self.send("\n".join(lines))
 
     def error(self, msg: str) -> None:
         self.send(f"🚨 PIPELINE ERROR\n<code>{msg[:300]}</code>")

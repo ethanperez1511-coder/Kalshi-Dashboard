@@ -9,11 +9,14 @@ from sqlalchemy import Engine
 from src.config import Settings
 from src.ingestion.market_sync import sync_markets
 from src.ingestion.price_recorder import record_price_snapshot
+from src.ingestion.series_ingest import ingest_series
 from src.kalshi.client import KalshiClient
 from src.trading_config import (
     EVENT_FETCH_CAP,
     INGEST_EVENT_CATEGORIES,
     MARKET_FETCH_CAP,
+    SERIES_FETCH_CAP,
+    ingest_series_list,
 )
 
 logger = logging.getLogger(__name__)
@@ -39,6 +42,17 @@ async def _fetch_and_sync(engine: Engine, settings: Settings) -> int:
                 last_price=m.last_price,
                 volume=m.volume,
             )
+
+        # Series-targeted pass, on its own call path after the general ingest.
+        # It shares none of the caps above, so nothing here can shrink the
+        # coverage the rest of the pipeline already depends on.
+        series = ingest_series_list()
+        if series:
+            coverage = await ingest_series(
+                engine, client, series, max_markets=SERIES_FETCH_CAP,
+            )
+            return len(markets) + coverage.fetched
+
         return len(markets)
     finally:
         await client._http.aclose()

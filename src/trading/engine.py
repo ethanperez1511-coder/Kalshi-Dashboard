@@ -151,6 +151,7 @@ class TradeEngine:
         reasoning: str,
         yes_bid: int = 0,
         yes_ask: int = 0,
+        model_name: str = "",
     ) -> Optional[Dict[str, Any]]:
         if not decision.approved:
             logger.info(f"Trade rejected for {market_id}: {decision.rejection_reasons}")
@@ -171,7 +172,7 @@ class TradeEngine:
         if is_paper:
             return self._execute_paper(
                 decision, market_id, p_model, implied_prob,
-                edge, net_ev, confidence, reasoning, fill_price,
+                edge, net_ev, confidence, reasoning, fill_price, model_name,
             )
         else:
             if self._client is None:
@@ -182,7 +183,7 @@ class TradeEngine:
             return _run_async(
                 self._execute_live(
                     decision, market_id, p_model, implied_prob,
-                    edge, net_ev, confidence, reasoning, fill_price,
+                    edge, net_ev, confidence, reasoning, fill_price, model_name,
                 )
             )
 
@@ -197,6 +198,7 @@ class TradeEngine:
         confidence: float,
         reasoning: str,
         fill_price: int = 0,
+        model_name: str = "",
     ) -> Dict[str, Any]:
         actual_price = fill_price if fill_price > 0 else decision.price_cents
         with get_session(self._engine) as session:
@@ -220,6 +222,7 @@ class TradeEngine:
                 # makes paper and live PnL directly comparable.
                 entry_fee=kalshi_fee(decision.quantity, actual_price),
                 entry_fee_source="simulated",
+                model_name=model_name or None,
             )
             session.add(trade)
 
@@ -274,6 +277,7 @@ class TradeEngine:
         confidence: float,
         reasoning: str,
         fill_price: int = 0,
+        model_name: str = "",
     ) -> Dict[str, Any]:
         # Limit price in the order's own side terms (maker price from
         # _compute_fill_price); fall back to the decision price.
@@ -282,7 +286,7 @@ class TradeEngine:
         # 1. Create pending trade record BEFORE API call
         trade_id = self._create_pending_trade(
             decision, market_id, p_model, implied_prob,
-            edge, net_ev, confidence, reasoning, limit_price,
+            edge, net_ev, confidence, reasoning, limit_price, model_name,
         )
 
         order_id = None
@@ -366,6 +370,7 @@ class TradeEngine:
     def _create_pending_trade(
         self, decision, market_id, p_model, implied_prob,
         edge, net_ev, confidence, reasoning, limit_price: int = 0,
+        model_name: str = "",
     ) -> int:
         with get_session(self._engine) as session:
             trade = Trade(
@@ -383,6 +388,7 @@ class TradeEngine:
                 reasoning=reasoning,
                 is_paper=False,
                 status="pending",
+                model_name=model_name or None,
             )
             session.add(trade)
             session.commit()
