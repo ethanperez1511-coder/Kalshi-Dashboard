@@ -151,3 +151,53 @@ rolling window — rather than a vague one.
 structured. A structured failure names its own fix; a uniform one means the model
 is wrong. Never move the bar to make the failure go away, and never adopt a
 remedy without re-running the unchanged gate on fresh held-out data.
+
+---
+
+# PRINCIPLE: A check that cannot fail is not a check.
+
+This is the named rule, not another entry. Every guard, test and monitor is
+evaluated against it.
+
+**A check must have a demonstrated failure mode.** Not a plausible one — a
+shown one. Break the thing it protects and watch the check go red. If nobody
+has ever seen it fail, what exists is the appearance of coverage, and the
+appearance is worse than nothing because it stops anyone looking.
+
+Four instances of this, all caught late, all in this codebase:
+
+1. **The self-verifying signature test.** `test_signature_verifies` signed a
+   message and verified it with the same padding and message shape the signer
+   used. It passed for months while every authenticated Kalshi endpoint
+   returned 401. *Any* scheme would have passed it — it compared the code to
+   itself, never to the counterparty. Only a live call found it, and only
+   because the live flip would have failed on the first request.
+
+2. **The guard that skipped without credentials.** The station-mapping check
+   used `skipif(no credentials)`. On every machine without secrets it reported
+   success while verifying nothing — precisely the case it existed to catch.
+
+3. **The archive that succeeded with zero rows.** The forecast archive passed
+   its unit tests, then wrote zero MOS rows on its first live run because the
+   12Z model run had not posted yet. Gridpoint wrote 56 in the same call, so it
+   looked like a healthy run against a quiet source.
+
+4. **The migration that migrated nothing.** `python -m src.migrate` would have
+   inspected a near-empty `Base.metadata`, reported "schema up to date", and
+   changed nothing on Neon — because table registration is a side effect of
+   importing model modules and the CLI imported almost none of them.
+
+**How to apply it, before writing the check:**
+
+- Name the failure it catches, then *cause* that failure and watch it go red.
+  If you cannot cause it, the check does not test what you think it does.
+- Never verify a component against itself. A signature test must verify against
+  the counterparty's expectation; a parser test must use a real captured
+  payload, not one written from the same assumption as the parser.
+- Treat "passed" and "did not run" as different outcomes. A skip, an empty
+  result set, and a zero-row write are all *absence of evidence* and must be
+  reported as such, never as success.
+- For anything that accumulates or writes, assert on the artefact — rows
+  landed, bytes written, count non-zero — not on the absence of an exception.
+- Prefer checks whose failure is loud by construction: a stale fit that makes
+  cells unpriceable, a recorder that exits non-zero when it wrote nothing.
