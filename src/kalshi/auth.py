@@ -1,4 +1,4 @@
-"""RSA-PKCS1v15-SHA256 request signing for the Kalshi API v2."""
+"""RSA-PSS-SHA256 request signing for the Kalshi API v2."""
 from __future__ import annotations
 
 import base64
@@ -46,11 +46,33 @@ class KalshiAuth:
             raise ValueError("Must provide either private_key_path or private_key_pem")
 
     def sign_request(self, method: str, path: str) -> dict[str, str]:
+        """Sign a request the way Kalshi actually verifies it.
+
+        Two things here were wrong until 2026-08-11 and every authenticated
+        endpoint had been returning 401 the whole time:
+
+          padding  must be PSS, not PKCS1v15
+          message  must be timestamp + METHOD + path CONCATENATED, with no
+                   newline separators
+
+        Verified against the live API on /portfolio/balance — PSS+concat
+        returns 200, and all three other combinations return
+        INCORRECT_API_KEY_SIGNATURE.
+
+        This was invisible because every market-data endpoint Kalshi serves is
+        PUBLIC, so ingest, scoring and settlement all worked. Only balance,
+        positions, fills, place_order and cancel_order were affected — none of
+        which paper mode calls. The first thing a live flip would have done is
+        fail.
+        """
         timestamp_ms = str(int(time.time() * 1000))
-        message = f"{timestamp_ms}\n{method.upper()}\n{path}"
+        message = f"{timestamp_ms}{method.upper()}{path}"
         signature = self._private_key.sign(
             message.encode(),
-            padding.PKCS1v15(),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=hashes.SHA256().digest_size,
+            ),
             hashes.SHA256(),
         )
         return {

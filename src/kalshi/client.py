@@ -188,7 +188,7 @@ class KalshiClient:
         return response.json()
 
     async def get_orderbook(self, ticker: str) -> KalshiOrderbook:
-        response = await self._request("GET", f"/orderbook/{ticker}")
+        response = await self._request("GET", f"/markets/{ticker}/orderbook")
         data = response.json()
         return KalshiOrderbook(**data.get("orderbook", data))
 

@@ -6,9 +6,15 @@ needs the refit job looked at; a paused cell means live results are
 contradicting the offline evidence. Collapsing those into "no weather trades
 today" would hide which one is happening.
 
-Denver carries a watch flag: it cleared with the least room (held-out Brier
-skill 0.333 at lead 3 against a 0.05 bar), so it is where live drift should
-show up first.
+The watch flag is RANK-BASED, not name-based: it sits on whichever promoted
+cell is currently weakest and moves as ranks change. Pinning it to a station
+means watching yesterday's problem — Denver was the weakest cell under the
+fixed-window fit (0.333 at lead 3) and is mid-pack under the rolling refit,
+while KPHL/L3 is now the floor. A station keeps the flag only while it earns it.
+
+Live trailing Brier ranks ahead of held-out skill wherever it exists, since
+prospective evidence beats retrospective. Until a cell has settled trades there
+is no live number, so held-out skill stands in and the basis is stated.
 """
 from __future__ import annotations
 
@@ -29,8 +35,42 @@ from src.weather.fitting import (
 from src.weather.promotion import MIN_PAIRS_PER_CELL
 from src.weather.stations import STATIONS
 
-# Cleared the gate with the least margin, so drift here is the early warning.
-WATCH_STATIONS = ("KXHIGHDEN",)
+# Station prefix per MOS station, for mapping a cell back to its series.
+_SERIES_BY_STATION = {st.mos_station: series for series, st in STATIONS.items()}
+
+
+def weakest_promoted_cell(engine: Engine):
+    """The promoted cell most likely to fail next, and why it is ranked there.
+
+    Live trailing Brier wins where it exists (higher is worse); otherwise
+    held-out Brier skill (lower is worse). Returns None when nothing is
+    promoted — there is no weakest cell if there are no cells.
+    """
+    candidates = [f for f in all_fits(engine) if f.promoted]
+    if not candidates:
+        return None
+
+    ranked = []
+    for fit in candidates:
+        series = _SERIES_BY_STATION.get(fit.station, fit.station)
+        value, n = live_brier(engine, series)
+        if value is not None:
+            # Live evidence sorts first and worst-first within itself.
+            ranked.append((0, -value, fit, series, "live Brier", value, n))
+        else:
+            skill = fit.brier_skill if fit.brier_skill is not None else 0.0
+            ranked.append((1, skill, fit, series, "held-out skill", skill, n))
+
+    ranked.sort(key=lambda r: (r[0], r[1]))
+    _, _, fit, series, basis, value, n = ranked[0]
+    return {
+        "station": fit.station,
+        "series": series,
+        "lead_days": fit.lead_days,
+        "basis": basis,
+        "value": value,
+        "settled": n,
+    }
 
 
 def weather_digest(engine: Engine, now: dt.datetime = None) -> Dict[str, Any]:
@@ -64,14 +104,9 @@ def weather_digest(engine: Engine, now: dt.datetime = None) -> Dict[str, Any]:
         if series in STATIONS:
             per_station[series] = per_station.get(series, 0) + count
 
-    watch = {}
-    for series in WATCH_STATIONS:
-        value, n = live_brier(engine, series)
-        watch[series] = {
-            "live_brier": value,
-            "settled": n,
-            "needed": GUARD_MIN_SETTLED,
-        }
+    watch = weakest_promoted_cell(engine)
+    if watch:
+        watch["needed"] = GUARD_MIN_SETTLED
 
     return {
         "cells_total": len(fits),
@@ -109,12 +144,20 @@ def format_weather_digest(data: Dict[str, Any]) -> str:
             for k, v in sorted(data["paper_trades_per_station"].items())
         )
         lines.append(f"   trades by station: {breakdown}")
-    for series, w in data.get("watch", {}).items():
-        label = series.replace("KXHIGH", "")
-        if w["live_brier"] is None:
-            lines.append(f"   👁 {label} watch: {w['settled']}/{w['needed']} settled")
+    watch = data.get("watch")
+    if watch:
+        label = watch["series"].replace("KXHIGH", "")
+        if watch["basis"] == "live Brier":
+            lines.append(
+                f"   👁 weakest: {label}/L{watch['lead_days']} — live Brier "
+                f"{watch['value']:.3f} ({watch['settled']} settled)"
+            )
         else:
-            lines.append(f"   👁 {label} watch: live Brier {w['live_brier']:.3f}")
+            lines.append(
+                f"   👁 weakest: {label}/L{watch['lead_days']} — held-out skill "
+                f"{watch['value']:.3f} ({watch['settled']}/{watch['needed']} settled, "
+                f"no live number yet)"
+            )
     depth = data.get("gridpoint_archive") or {}
     if depth.get("rows"):
         lines.append(f"   gridpoint archive: {depth['rows']} rows (challenger history)")

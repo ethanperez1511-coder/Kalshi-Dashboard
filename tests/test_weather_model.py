@@ -393,3 +393,75 @@ class TestGuardEvents:
         self._settle(engine, GUARD_MIN_SETTLED, 0.95, won=False, series="KXHIGHDEN")
         events = guard_events(engine, ["KXHIGHNY", "KXHIGHDEN"])
         assert [e["series"] for e in events] == ["KXHIGHDEN"]
+
+
+# --------------------------------------------------------------------------
+# 8. Watch flag ranks; it is not pinned to a name
+# --------------------------------------------------------------------------
+
+class TestWatchFlagIsRankBased:
+    """Pinning the flag to a station means watching yesterday's problem.
+
+    Denver was the weakest cell under the fixed-window fit (0.333 at lead 3)
+    and is mid-pack under the rolling refit; KPHL/L3 is now the floor.
+    """
+
+    def test_picks_the_lowest_held_out_skill_when_no_live_data(self, engine):
+        from src.weather.digest import weakest_promoted_cell
+
+        _seed_fit(engine, station="KMIA", lead=1, skill=0.79)
+        _seed_fit(engine, station="KDEN", lead=3, skill=0.45)
+        _seed_fit(engine, station="KPHL", lead=3, skill=0.42)
+
+        watch = weakest_promoted_cell(engine)
+        assert watch["station"] == "KPHL"
+        assert watch["basis"] == "held-out skill"
+
+    def test_flag_moves_when_ranks_change(self, engine):
+        from src.weather.digest import weakest_promoted_cell
+        from src.models.weather import WeatherCellFit
+
+        _seed_fit(engine, station="KDEN", lead=3, skill=0.45)
+        _seed_fit(engine, station="KPHL", lead=3, skill=0.42)
+        assert weakest_promoted_cell(engine)["station"] == "KPHL"
+
+        with get_session(engine) as s:
+            s.query(WeatherCellFit).filter_by(station="KDEN").first().brier_skill = 0.10
+            s.commit()
+        assert weakest_promoted_cell(engine)["station"] == "KDEN"
+
+    def test_unpromoted_cells_are_not_watched(self, engine):
+        """The flag tracks the weakest thing still trading, not the worst
+        thing on record — an unpromoted cell is already not pricing."""
+        from src.weather.digest import weakest_promoted_cell
+
+        _seed_fit(engine, station="KMIA", lead=1, skill=0.79)
+        _seed_fit(engine, station="KPHL", lead=3, skill=0.01, promoted=False)
+        assert weakest_promoted_cell(engine)["station"] == "KMIA"
+
+    def test_live_brier_outranks_held_out_skill(self, engine):
+        """Prospective evidence beats retrospective: a cell with a live number
+        is watched ahead of one with only an offline score."""
+        from src.weather.digest import weakest_promoted_cell
+
+        _seed_fit(engine, station="KPHL", lead=3, skill=0.42)
+        _seed_fit(engine, station="KNYC", lead=1, skill=0.58)
+        with get_session(engine) as s:
+            for i in range(GUARD_MIN_SETTLED):
+                s.add(Trade(
+                    market_id=f"KXHIGHNY-26AUG{i:02d}-T90", side="yes", action="buy",
+                    price=50, quantity=1, p_model=0.8, implied_prob=0.5, edge=0.1,
+                    net_ev=0.05, position_size_dollars=0.5, confidence=0.8,
+                    reasoning="t", is_paper=True, status="closed",
+                    realized_pnl=-1.0, model_name="WeatherModel",
+                ))
+            s.commit()
+
+        watch = weakest_promoted_cell(engine)
+        assert watch["station"] == "KNYC"
+        assert watch["basis"] == "live Brier"
+
+    def test_no_promoted_cells_means_no_watch(self, engine):
+        from src.weather.digest import weakest_promoted_cell
+
+        assert weakest_promoted_cell(engine) is None
