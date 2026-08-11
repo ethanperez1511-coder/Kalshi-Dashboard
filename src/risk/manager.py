@@ -48,9 +48,14 @@ class RiskManager:
         # Compute shrinkage multiplier from calibration (if enough data)
         shrinkage = 1.0
         with get_session(self._engine) as session:
-            closed_count = session.query(Trade).filter(Trade.status == "closed").count()
+            # Legacy trades were placed by superseded code, so they say nothing
+            # about how the current system is calibrated.
+            closed_q = session.query(Trade).filter(
+                Trade.status == "closed", Trade.is_legacy.is_(False)
+            )
+            closed_count = closed_q.count()
             if closed_count >= MIN_SETTLED_TRADES:
-                closed_trades = session.query(Trade).filter(Trade.status == "closed").all()
+                closed_trades = closed_q.all()
                 wins = [t for t in closed_trades if (t.realized_pnl or 0) > 0]
                 avg_p = sum(t.p_model for t in closed_trades) / len(closed_trades)
                 actual_wr = len(wins) / len(closed_trades)

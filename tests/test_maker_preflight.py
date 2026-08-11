@@ -276,3 +276,104 @@ class TestDeployedCommitReporting:
         monkeypatch.setattr(alerter, "send", lambda text: sent.append(text))
         alerter.heartbeat(100.0, 11, 50)
         assert "🏷 deploy: abc12345" in sent[0]
+
+
+# --------------------------------------------------------------------------
+# 5. Legacy cutoff — the gate counts only the deployed system
+# --------------------------------------------------------------------------
+
+class TestLegacyCutoff:
+    def _trade(self, engine, sha=None, legacy=False, market="M", reasoning="x"):
+        from src.models.trade import Trade
+
+        with get_session(engine) as s:
+            s.add(Trade(
+                market_id=market, side="no", action="buy", price=96, quantity=3,
+                p_model=0.004, implied_prob=0.04, edge=0.03, net_ev=0.01,
+                position_size_dollars=2.88, confidence=0.8, reasoning=reasoning,
+                is_paper=True, status="filled", deploy_sha=sha, is_legacy=legacy,
+            ))
+            s.commit()
+
+    def test_trades_without_a_deploy_sha_are_marked_legacy(self, engine):
+        from src.legacy_cutoff import legacy_count, mark_legacy_trades
+
+        self._trade(engine)
+        assert mark_legacy_trades(engine) == 1
+        assert legacy_count(engine) == 1
+
+    def test_marking_is_idempotent(self, engine):
+        from src.legacy_cutoff import mark_legacy_trades
+
+        self._trade(engine)
+        mark_legacy_trades(engine)
+        assert mark_legacy_trades(engine) == 0
+
+    def test_deployed_trades_are_not_marked(self, engine):
+        from src.legacy_cutoff import gate_count, mark_legacy_trades
+
+        self._trade(engine, sha="ba5e3da0")
+        mark_legacy_trades(engine)
+        assert gate_count(engine) == 1
+
+    def test_gate_excludes_legacy_but_history_is_kept(self, engine):
+        """History stays; only its standing changes."""
+        from src.models.trade import Trade
+        from src.legacy_cutoff import gate_count, mark_legacy_trades
+
+        self._trade(engine)
+        self._trade(engine, sha="ba5e3da0")
+        mark_legacy_trades(engine)
+
+        assert gate_count(engine) == 1
+        with get_session(engine) as s:
+            assert s.query(Trade).count() == 2      # nothing deleted
+
+    def test_gate_counter_is_resynced_to_the_rows(self, engine):
+        """The counter is what can_trade_live reads, so it must agree with the
+        rows rather than drift from them."""
+        from src.legacy_cutoff import mark_legacy_trades, resync_gate_counter
+
+        with get_session(engine) as s:
+            s.query(TradingSettings).first().paper_trade_count = 11
+            s.commit()
+        self._trade(engine)
+        mark_legacy_trades(engine)
+
+        assert resync_gate_counter(engine) == 0
+        with get_session(engine) as s:
+            assert s.query(TradingSettings).first().paper_trade_count == 0
+
+    def test_polymarket_sourced_open_positions_are_flagged(self, engine):
+        """A position entered on a structurally biased p_model must surface for
+        review, not be silently held."""
+        from src.models.position import Position
+        from src.legacy_cutoff import suspect_open_positions
+
+        self._trade(
+            engine, market="KXNEXTISRAELPM-45JAN01-NBEN",
+            reasoning='Polymarket match (sim=1.00): "Will Naftali Bennett..."',
+        )
+        with get_session(engine) as s:
+            s.add(Position(
+                market_id="KXNEXTISRAELPM-45JAN01-NBEN", side="no",
+                entry_price=61, quantity=4, current_price=61, status="open",
+            ))
+            s.commit()
+
+        suspects = suspect_open_positions(engine)
+        assert len(suspects) == 1
+        assert suspects[0]["market_id"] == "KXNEXTISRAELPM-45JAN01-NBEN"
+        assert "understates YES" in suspects[0]["reason"]
+
+    def test_non_polymarket_positions_are_not_flagged(self, engine):
+        """The flag must discriminate, or it is noise."""
+        from src.models.position import Position
+        from src.legacy_cutoff import suspect_open_positions
+
+        self._trade(engine, market="SPORTS-1", reasoning="Parlay 4 legs: spread(38%,ext)")
+        with get_session(engine) as s:
+            s.add(Position(market_id="SPORTS-1", side="no", entry_price=85,
+                           quantity=3, current_price=85, status="open"))
+            s.commit()
+        assert suspect_open_positions(engine) == []

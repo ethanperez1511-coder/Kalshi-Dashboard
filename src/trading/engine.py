@@ -10,6 +10,7 @@ from src.models.position import Position
 from src.models.settings import TradingSettings
 from src.risk.manager import TradeDecision
 from src.execution.preflight import assert_maker_allowed
+from src.legacy_cutoff import current_deploy_sha
 from src.trading.fees import kalshi_fee
 from src.trading_config import (
     ORDER_TYPE,
@@ -230,6 +231,7 @@ class TradeEngine:
                 entry_fee=kalshi_fee(decision.quantity, actual_price),
                 entry_fee_source="simulated",
                 model_name=model_name or None,
+                deploy_sha=current_deploy_sha(),
             )
             session.add(trade)
 
@@ -396,6 +398,7 @@ class TradeEngine:
                 is_paper=False,
                 status="pending",
                 model_name=model_name or None,
+                deploy_sha=current_deploy_sha(),
             )
             session.add(trade)
             session.commit()

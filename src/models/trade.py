@@ -46,6 +46,21 @@ class Trade(Base):
     model_name: Mapped[Optional[str]] = mapped_column(
         String(60), nullable=True, default=None, index=True
     )
+    # Which deployed commit executed this trade. Absent means it predates
+    # deploy tracking, which is itself the signal — see is_legacy.
+    deploy_sha: Mapped[Optional[str]] = mapped_column(
+        String(40), nullable=True, default=None
+    )
+    # Excluded from the 50-trade gate and from calibration fits. The gate
+    # evaluates the system that would go live, and a trade placed by superseded
+    # code is not evidence about that system. The row stays — history is kept,
+    # only its standing changes.
+    # server_default, not just default: a Python-side default cannot be applied
+    # by ALTER TABLE ADD COLUMN on a populated table, and the migration guard
+    # correctly refuses NOT NULL columns it cannot backfill.
+    is_legacy: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="0", index=True, nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

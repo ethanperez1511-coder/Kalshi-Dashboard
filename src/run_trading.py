@@ -21,6 +21,8 @@ from src.weather.archive import run_daily_archive
 from src.weather.digest import format_weather_digest, weather_digest
 from src.recorder.health import format_recorder_health, recorder_health
 from src.digest_health import record_section
+from src.legacy_cutoff import mark_legacy_trades, resync_gate_counter
+from src.deployment_state import deployment_state, format_deployment_state
 from src.weather.fitting import guard_events
 from src.weather.stations import STATIONS
 from src.modeling.match_seed import apply_seed_decisions
@@ -75,6 +77,12 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
             run_daily_archive(engine)
         except Exception:
             logger.warning("Forecast archive failed (non-fatal)", exc_info=True)
+
+    # Trades placed before the deploy cutoff are history, not evidence: the
+    # gate evaluates the system that would go live, and superseded code is not
+    # that system. Rows are kept, marked, and excluded from the counter.
+    mark_legacy_trades(engine)
+    resync_gate_counter(engine)
 
     # Ensure trading settings exist (bankroll=$100, paper mode)
     ts = TradingSettings.get_or_create(engine)
@@ -158,6 +166,7 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
             coverage=_section("coverage", lambda: coverage_from_db(engine)) or None,
             per_model=_section("per-model", lambda: trades_by_model(engine)) or None,
             weather="\n".join([
+                _section("📦 Deploy", lambda: format_deployment_state(deployment_state(engine))),
                 _section("🌡 Weather", lambda: format_weather_digest(weather_digest(engine))),
                 _section("🎙 Recorder", lambda: format_recorder_health(recorder_health(engine))),
             ]),
