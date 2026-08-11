@@ -88,20 +88,41 @@ class TestFeeAccurateSettlement:
         # 100 + 5.00 - fee
         assert abs(bankroll - (100.0 + 5.00 - kalshi_fee(10, 50))) < 1e-9
 
-    def test_live_position_no_simulated_fee(self, engine):
-        # Live fills already pay real fees via Kalshi; don't double-charge.
+    def _seed_live_position(self, engine, entry_fee=None):
         with get_session(engine) as s:
             s.add(Position(market_id="ML", side="no", entry_price=50, quantity=10,
                            current_price=50, status="open"))
-            s.add(Trade(market_id="ML", side="no", action="buy", price=50, quantity=10,
-                        p_model=0.5, implied_prob=0.5, edge=0.0, net_ev=0.0,
-                        position_size_dollars=5.0, confidence=0.8, reasoning="t",
-                        is_paper=False, status="filled"))
+            trade = Trade(market_id="ML", side="no", action="buy", price=50, quantity=10,
+                          p_model=0.5, implied_prob=0.5, edge=0.0, net_ev=0.0,
+                          position_size_dollars=5.0, confidence=0.8, reasoning="t",
+                          is_paper=False, status="filled")
+            trade.entry_fee = entry_fee
+            s.add(trade)
             s.commit()
-        tracker = PortfolioTracker(engine)
-        result = tracker.close_position("ML", exit_price=0)
-        assert result["fee"] == 0.0
-        assert abs(result["realized_pnl"] - 5.00) < 1e-9
+
+    def test_live_position_settles_net_of_recorded_fee(self, engine):
+        """SUPERSEDES test_live_position_no_simulated_fee (2026-08-11).
+
+        The old test asserted live PnL was the fee-free gross number, on the
+        reasoning that Kalshi already charged the fee so charging it again would
+        double-count. The cash reasoning was right; the PnL conclusion was wrong.
+        Kalshi takes the fee at entry, so it never reaches the DB — leaving it
+        out of `realized_pnl` made every live trade look better than it was, and
+        that number feeds the Kelly shrinkage multiplier. The fee is now recorded
+        at fill time and consumed here. Double-charging is prevented in the cash
+        ledger instead (see TestCashLedger in tests/test_settlement_fees.py).
+        """
+        self._seed_live_position(engine, entry_fee=0.18)
+        result = PortfolioTracker(engine).close_position("ML", exit_price=0)
+        assert result["fee"] == 0.18
+        assert abs(result["realized_pnl"] - (5.00 - 0.18)) < 1e-9
+
+    def test_live_position_without_recorded_fee_estimates(self, engine):
+        # Legacy row predating entry_fee: 0.0 is known-wrong, so estimate.
+        self._seed_live_position(engine, entry_fee=None)
+        result = PortfolioTracker(engine).close_position("ML", exit_price=0)
+        assert result["fee"] == kalshi_fee(10, 50)
+        assert abs(result["realized_pnl"] - (5.00 - kalshi_fee(10, 50))) < 1e-9
 
 
 # ---------- Held-market dedup ----------

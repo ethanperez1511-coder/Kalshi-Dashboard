@@ -30,6 +30,15 @@ class Trade(Base):
     order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, default=None)
     exit_price: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
     realized_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
+    # Entry trading fee in DOLLARS, recorded at fill time. Paper stores the
+    # simulated Kalshi fee; live stores the real fee from the fills endpoint.
+    # None means "written before fee recording existed" — settlement falls back
+    # to the simulated estimate rather than pretending the fee was zero.
+    entry_fee: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
+    # "simulated" (paper) | "kalshi_fills" (real) | "estimated" (fills lookup failed)
+    entry_fee_source: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

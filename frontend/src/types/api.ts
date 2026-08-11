@@ -130,6 +130,43 @@ export interface SystemStatus {
   version: string;
 }
 
+export interface MarketMatch {
+  id: number;
+  kalshi_market_id: string;
+  poly_condition_id: string;
+  status: string;
+  similarity: number;
+  kalshi_title: string | null;
+  poly_question: string | null;
+  verdict: string | null;
+  reason: string | null;
+  decided_by: string | null;
+  created_at: string | null;
+}
+
+export interface OddsCacheEntry {
+  sport_key: string;
+  source: string;
+  fetched_at: string;
+  age_minutes: number;
+}
+
+export interface QuotaStatus {
+  month: string;
+  source: string;
+  used: number;
+  cap: number;
+  remaining: number;
+  burn_per_day: number;
+  projected_month_end: number;
+  days_in_month: number;
+  days_elapsed: number;
+  days_to_exhaustion: number | null;
+  projected_overrun: boolean;
+  fallback_enabled: boolean;
+  cache: OddsCacheEntry[];
+}
+
 export interface PriceSnapshot {
   yes_bid: number;
   yes_ask: number;

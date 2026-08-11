@@ -1,6 +1,7 @@
 import { useApi } from '../hooks/useApi';
 import KpiCard from '../components/KpiCard';
 import Panel from '../components/Panel';
+import QuotaCard from '../components/QuotaCard';
 import type { PortfolioSummary, Position, Trade, Metrics, EquityPoint } from '../types/api';
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -225,7 +226,9 @@ export default function Overview() {
       </div>
 
       {/* Bottom charts row */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 'var(--gap-md)', height: 280 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 'var(--gap-md)', height: 280 }}>
+        <QuotaCard animDelay={460} />
+
         <Panel title="Equity Curve" animDelay={480}>
           {(equity ?? []).length <= 1 ? (
             <Empty>No trade history yet</Empty>

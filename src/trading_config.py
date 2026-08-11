@@ -92,6 +92,28 @@ ODDS_SPORT_KEYS: str = _env_str(
     "baseball_mlb,basketball_nba,icehockey_nhl",
 )
 
+# --- Phase 1.2: odds quota survival ---
+# The module-level TTL cache above never applied in production: the pipeline is
+# a per-cycle GitHub Actions cron, so every tick got a fresh interpreter and an
+# empty cache — ~864 requests/day against a ~500/month allowance. The durable
+# cache now lives in the DB, and a ledger stops spending before the API refuses.
+ODDS_MONTHLY_QUOTA: int = _env_int("TRADING_ODDS_MONTHLY_QUOTA", 500)
+# 0 = derive from the budget: 720h * n_sports / cap (3 sports, 500 cap -> ~4.3h).
+ODDS_TTL_MINUTES_OVERRIDE: int = _env_int("TRADING_ODDS_TTL_MINUTES_OVERRIDE", 0)
+
+# Free single-book fallback (ESPN scoreboard, DraftKings only) for when the
+# metered provider is dark. Verified live 2026-08-11: moneyline present for
+# MLB/NBA/NHL, but ONE book and only on the day of the game — weaker evidence
+# than the multi-book consensus, so it is opt-in and confidence-capped.
+ENABLE_ESPN_ODDS: bool = _env_bool("TRADING_ENABLE_ESPN_ODDS", False)
+ESPN_MAX_CONFIDENCE: float = _env_float("TRADING_ESPN_MAX_CONFIDENCE", 0.70)
+
+# Run the market-only gates (volume/spread/expiry) BEFORE model dispatch, so no
+# quota or CPU is spent on a market that cannot qualify. Provably decision-
+# neutral (see tests), but it does stop writing Opportunity rows for markets
+# that fail those gates, so it is opt-in.
+PRESCREEN_BEFORE_MODELS: bool = _env_bool("TRADING_PRESCREEN_BEFORE_MODELS", False)
+
 # --- Coverage: Polymarket scan depth ---
 # Polymarket's public API is free and unlimited — scan deeper for more matches.
 POLYMARKET_SCAN_LIMIT: int = _env_int("TRADING_POLYMARKET_SCAN_LIMIT", 3000)
@@ -107,6 +129,30 @@ EVENT_FETCH_CAP: int = _env_int("TRADING_EVENT_FETCH_CAP", 2000)
 # minimum title similarity for a Kalshi↔Polymarket match.
 POLYMARKET_MIN_VOLUME_USD: float = _env_float("TRADING_POLYMARKET_MIN_VOLUME_USD", 25_000.0)
 POLYMARKET_MIN_SIMILARITY: float = _env_float("TRADING_POLYMARKET_MIN_SIMILARITY", 0.7)
+
+# --- Phase 1.3: entity-level match verification ---
+# Token similarity cannot separate "CPI above 3%" from "CPI below 3%" — same
+# words, same numbers, opposite meaning — and that pair was matching in
+# production. Titles are now compared field by field (direction, magnitude,
+# date, negation, party order) and anything short of a clean match produces no
+# estimate and lands in the review queue. ON by default: this is a correction
+# to wrong behaviour, and it can only ever REDUCE the set of accepted matches.
+POLYMARKET_REQUIRE_ENTITY_MATCH: bool = _env_bool(
+    "TRADING_POLYMARKET_REQUIRE_ENTITY_MATCH", True
+)
+
+# --- Phase 1.5: resolution-horizon check ---
+# Identical titles can still be different questions. Kalshi's "next Prime
+# Minister of Israel" runs to 2045; the Polymarket contract of the same name
+# force-resolves at the end of 2026. The short-dated probability is bounded
+# above by the long-dated one and the gap always points the same way, so
+# pricing one off the other manufactures a persistent one-sided "edge" that
+# only reveals itself at settlement. Pairs whose horizons differ by more than
+# this land in the review queue instead. Tuned against live data: at 90 days
+# all 13 currently-matching pairs still price.
+POLYMARKET_MAX_HORIZON_GAP_DAYS: int = _env_int(
+    "TRADING_POLYMARKET_MAX_HORIZON_GAP_DAYS", 90
+)
 
 # --- Pre-live hardening: stale data guard ---
 # Never score a market whose latest price snapshot is older than this.

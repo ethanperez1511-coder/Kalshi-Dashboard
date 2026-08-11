@@ -3,6 +3,7 @@ import NavBar from './components/NavBar';
 import Overview from './pages/Overview';
 import Markets from './pages/Markets';
 import Backtest from './pages/Backtest';
+import Review from './pages/Review';
 import Settings from './pages/Settings';
 import './App.css';
 
@@ -15,6 +16,7 @@ function AppShell() {
           <Route path="/" element={<Overview />} />
           <Route path="/markets" element={<Markets />} />
           <Route path="/backtest" element={<Backtest />} />
+          <Route path="/review" element={<Review />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

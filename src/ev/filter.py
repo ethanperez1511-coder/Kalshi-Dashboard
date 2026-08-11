@@ -71,6 +71,34 @@ class TradeFilter:
             return 0.05
         return 0.08
 
+    def prescreen(
+        self,
+        daily_volume: int,
+        bid_ask_spread_cents: int,
+        hours_to_expiry: float,
+    ) -> bool:
+        """Can this market qualify at all, before any model has run?
+
+        Only market facts are consulted — volume, spread, expiry — never
+        anything derived from a probability estimate. Every check here is a
+        verbatim copy of the corresponding check in :meth:`evaluate`, so a
+        market rejected here would have been rejected there too: skipping the
+        model is an optimisation, not a decision. `tests/test_odds_quota.py`
+        asserts that subset property over a grid.
+
+        The point is cost: model dispatch can spend a metered odds request, and
+        spending it on a market that fails a liquidity gate is pure waste.
+        """
+        if daily_volume < self.min_daily_volume:
+            return False
+        if bid_ask_spread_cents > self.max_spread_cents:
+            return False
+        if hours_to_expiry < self.min_hours_to_expiry:
+            return False
+        if self.max_hours_to_expiry > 0 and hours_to_expiry > self.max_hours_to_expiry:
+            return False
+        return True
+
     def evaluate(
         self,
         ev_result: EVResult,

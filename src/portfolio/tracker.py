@@ -59,11 +59,16 @@ class PortfolioTracker:
                 .first()
             )
 
-            # Paper fills pay no real fee, so simulate Kalshi's entry fee here to
-            # keep paper PnL honest. Live fills already paid it on Kalshi — never
-            # double-charge them.
+            # PnL is path-independent: one formula for paper and live. The entry
+            # fee was recorded at fill time (simulated for paper, the real Kalshi
+            # fill fee for live). A legacy row predating that field has no fee
+            # recorded — fall back to the simulated estimate, because 0.0 is
+            # known-wrong for live (the fee really was paid on Kalshi).
             is_paper = trade.is_paper if trade is not None else True
-            fee = kalshi_fee(pos.quantity, pos.entry_price) if is_paper else 0.0
+            if trade is not None and trade.entry_fee is not None:
+                fee = trade.entry_fee
+            else:
+                fee = kalshi_fee(pos.quantity, pos.entry_price)
             realized_pnl = round(gross_pnl - fee, 4)
 
             if trade:
@@ -71,7 +76,10 @@ class PortfolioTracker:
                 trade.exit_price = side_exit  # same side-cost terms as trade.price
                 trade.realized_pnl = realized_pnl
 
-            # Update bankroll
+            # Both paths keep the same equity-at-cost ledger: untouched at fill,
+            # moved here by the realized PnL. Nothing about this is
+            # path-dependent any more, which is what lets the paper evaluation
+            # window measure the sizing behaviour live will use.
             settings = session.query(TradingSettings).first()
             if settings:
                 settings.bankroll = round(settings.bankroll + realized_pnl, 2)

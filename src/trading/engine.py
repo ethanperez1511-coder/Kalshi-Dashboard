@@ -9,6 +9,7 @@ from src.models.trade import Trade
 from src.models.position import Position
 from src.models.settings import TradingSettings
 from src.risk.manager import TradeDecision
+from src.trading.fees import kalshi_fee
 from src.trading_config import (
     ORDER_TYPE,
     REQUOTE_SECONDS,
@@ -41,7 +42,13 @@ def _run_async(coro):
 
 
 def sync_live_bankroll(engine: Engine, kalshi_client) -> Optional[float]:
-    """Overwrite the DB bankroll with the real Kalshi cash balance.
+    """Reconcile the DB bankroll against the real Kalshi account.
+
+    Kalshi reports *cash*, which excludes open positions. The bankroll field is
+    an equity-at-cost ledger on both paths, so the cost basis of open positions
+    is added back before storing. Writing the raw cash figure is what used to
+    make live's bankroll mean something different from paper's, and every risk
+    limit divides by it.
 
     Live mode only — the paper bankroll is virtual and must never be
     overwritten by this. Returns the synced dollar amount, or None if no
@@ -50,15 +57,23 @@ def sync_live_bankroll(engine: Engine, kalshi_client) -> Optional[float]:
     if kalshi_client is None:
         return None
     balance = _run_async(kalshi_client.get_balance())
-    dollars = round(balance.balance / 100.0, 2)
+    cash = balance.balance / 100.0
     with get_session(engine) as session:
+        open_cost = sum(
+            p.cost_basis
+            for p in session.query(Position).filter_by(status="open").all()
+        )
+        dollars = round(cash + open_cost, 2)
         s = session.query(TradingSettings).first()
         if s:
             s.bankroll = dollars
             if dollars > s.peak_bankroll:
                 s.peak_bankroll = dollars
         session.commit()
-    logger.info(f"Live bankroll synced from Kalshi: ${dollars:.2f}")
+    logger.info(
+        f"Live bankroll synced from Kalshi: ${dollars:.2f} "
+        f"(cash ${cash:.2f} + open cost basis ${open_cost:.2f})"
+    )
     return dollars
 
 
@@ -200,6 +215,11 @@ class TradeEngine:
                 reasoning=reasoning,
                 is_paper=True,
                 status="filled",
+                # Paper pays no real fee, so record the simulated Kalshi fee now.
+                # Settlement consumes this field for both paths, which is what
+                # makes paper and live PnL directly comparable.
+                entry_fee=kalshi_fee(decision.quantity, actual_price),
+                entry_fee_source="simulated",
             )
             session.add(trade)
 
@@ -286,13 +306,25 @@ class TradeEngine:
             filled_qty = await self._poll_for_fill(order_id, decision.quantity)
 
             if filled_qty == decision.quantity:
-                self._mark_trade_filled(trade_id, decision, market_id, limit_price, filled_qty)
+                fee, fee_source = await self._fetch_entry_fee(
+                    order_id, filled_qty, limit_price
+                )
+                self._mark_trade_filled(
+                    trade_id, decision, market_id, limit_price, filled_qty,
+                    entry_fee=fee, entry_fee_source=fee_source,
+                )
                 logger.info(f"Live order FILLED: {order_id}")
                 status = "filled"
             elif filled_qty > 0:
                 # Partial fill at timeout: keep what filled, cancel the rest.
                 await self._cancel_order_safe(order_id)
-                self._mark_trade_filled(trade_id, decision, market_id, limit_price, filled_qty)
+                fee, fee_source = await self._fetch_entry_fee(
+                    order_id, filled_qty, limit_price
+                )
+                self._mark_trade_filled(
+                    trade_id, decision, market_id, limit_price, filled_qty,
+                    entry_fee=fee, entry_fee_source=fee_source,
+                )
                 logger.warning(
                     f"Live order PARTIALLY filled ({filled_qty}/{decision.quantity}), "
                     f"remainder cancelled: {order_id}"
@@ -370,21 +402,51 @@ class TradeEngine:
                 trade.status = status
             session.commit()
 
+    async def _fetch_entry_fee(
+        self, order_id: Optional[str], quantity: int, price_cents: int,
+    ) -> tuple:
+        """Real Kalshi entry fee in dollars for a live fill, plus its provenance.
+
+        Kalshi charges the fee at entry, so it never appears in settlement data —
+        the fills endpoint is the only place the true number lives. If that
+        lookup fails we fall back to the published formula and label the result
+        an estimate. Never returns 0.0 on failure: a silent zero is exactly the
+        bug this change exists to kill.
+        """
+        estimate = kalshi_fee(quantity, price_cents)
+        if self._client is None or not order_id:
+            return estimate, "estimated"
+        try:
+            fills = await self._client.get_fills(order_id=order_id)
+            if not fills:
+                raise ValueError(f"no fills returned for order {order_id}")
+            cents = sum(int(f.fee) for f in fills)
+            return round(cents / 100.0, 4), "kalshi_fills"
+        except Exception:
+            logger.warning(
+                f"Could not read real fee for order {order_id}; "
+                f"using estimate ${estimate:.2f}", exc_info=True,
+            )
+            return estimate, "estimated"
+
     def _mark_trade_filled(
         self, trade_id: int, decision, market_id: str,
         fill_price: int, filled_qty: int,
+        entry_fee: float = 0.0, entry_fee_source: str = "estimated",
     ):
         """Record a (possibly partial) live fill.
 
         fill_price is in the order's own side terms — positions store
-        side-cost everywhere. Bankroll is debited the actual fill cost,
-        not the pre-trade size estimate.
+        side-cost everywhere. Bankroll is debited the actual fill cost plus the
+        entry fee, matching the cash Kalshi actually takes.
         """
         with get_session(self._engine) as session:
             trade = session.get(Trade, trade_id)
             if trade:
                 trade.status = "filled"
                 trade.quantity = filled_qty
+                trade.entry_fee = entry_fee
+                trade.entry_fee_source = entry_fee_source
 
             # Create or update position
             existing_pos = (
@@ -405,13 +467,11 @@ class TradeEngine:
                 )
                 session.add(pos)
 
-            # Deduct actual cost from bankroll
-            settings = session.query(TradingSettings).first()
-            if settings:
-                settings.bankroll = round(
-                    settings.bankroll - fill_price * filled_qty / 100.0, 2
-                )
-
+            # The bankroll is deliberately NOT moved here. It is an
+            # equity-at-cost ledger on both paths — buying swaps cash for a
+            # position of equal cost, so equity is unchanged — and it moves only
+            # at settlement, by realized PnL (which is already net of this fee).
+            # Debiting here is what made live's ledger incomparable to paper's.
             session.commit()
 
     async def _poll_for_fill(self, order_id: str, quantity: int) -> int:

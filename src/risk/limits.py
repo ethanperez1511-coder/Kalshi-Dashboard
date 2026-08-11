@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from sqlalchemy import Engine
 from src.database import get_session
+from src.portfolio.equity import total_equity
 from src.models.position import Position
 from src.models.trade import Trade
 from src.models.settings import TradingSettings
@@ -76,7 +77,11 @@ class LimitsChecker:
             return LimitsResult(approved=False, violations=["No trading settings found"])
 
         violations = []
-        bankroll = settings["bankroll"]
+        # Every limit divides by total equity — cash plus the mark-to-market
+        # value of open positions — and never by the raw ledger field. That is
+        # what makes paper and live size identically: the two paths keep the
+        # same ledger, and this is the one number derived from it.
+        bankroll = total_equity(self._engine)
 
         # 1. Max single trade
         max_single = bankroll * settings["max_single_trade_pct"]
@@ -104,7 +109,9 @@ class LimitsChecker:
                 f"({settings['daily_loss_limit_pct']:.0%} of bankroll) — paused"
             )
 
-        # 4. Drawdown circuit breaker
+        # 4. Drawdown circuit breaker.
+        # Peak is a realized high-water mark; current is marked to market, so an
+        # underwater book trips the breaker before it is booked as a loss.
         peak = settings["peak_bankroll"]
         if peak > 0:
             drawdown = (peak - bankroll) / peak

@@ -7,6 +7,7 @@ from src.database import get_session
 from src.ev.calculator import EVResult
 from src.risk.kelly import kelly_size, calibration_shrinkage
 from src.risk.limits import LimitsChecker
+from src.portfolio.equity import total_equity
 from src.models.settings import TradingSettings
 from src.models.trade import Trade
 from src.trading_config import MIN_SETTLED_TRADES
@@ -56,18 +57,21 @@ class RiskManager:
                 cal_err = abs(avg_p - actual_wr)
                 shrinkage = calibration_shrinkage(cal_err)
 
-        # Kelly sizing
+        # Kelly sizes against total equity (cash + mark-to-market open
+        # positions) — the same number the limits divide by, never the raw
+        # ledger field, which used to mean different things on the two paths.
+        equity = total_equity(self._engine)
         p = ev_result.p_model if side == "yes" else (1 - ev_result.p_model)
         kelly = kelly_size(
             p_model=p,
             price_cents=price_cents,
-            bankroll=settings.bankroll,
+            bankroll=equity,
             kelly_fraction=settings.kelly_fraction,
             shrinkage_multiplier=shrinkage,
         )
 
         # Cap at max single trade
-        max_trade = settings.bankroll * settings.max_single_trade_pct
+        max_trade = equity * settings.max_single_trade_pct
         dollars = min(kelly.recommended_dollars, max_trade)
         contract_cost = price_cents / 100.0
         quantity = int(dollars / contract_cost) if contract_cost > 0 else 0

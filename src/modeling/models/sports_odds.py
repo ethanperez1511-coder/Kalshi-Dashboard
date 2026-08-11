@@ -11,7 +11,7 @@ from sqlalchemy import Engine
 
 from src.modeling.base import BaseModel, ModelResult, MODEL_TYPE_INDEPENDENT
 from src.modeling.odds_api import GameOdds, OddsClient
-from src.trading_config import SKIP_SAME_GAME_PARLAYS
+from src.trading_config import ESPN_MAX_CONFIDENCE, SKIP_SAME_GAME_PARLAYS
 
 logger = logging.getLogger(__name__)
 
@@ -334,7 +334,14 @@ class SportsOddsModel(BaseModel):
         for _, prob in leg_probs:
             parlay_prob *= prob
 
+        # Confidence tracks the weakest source any leg leaned on. A multi-book
+        # consensus earns the full 0.85; the ESPN fallback carries DraftKings
+        # only, so it cannot be de-vigged across books and inherits that one
+        # book's juice asymmetry — cap it well below.
+        sources = {g.source for g in leg_games if g is not None} or {"the_odds_api"}
         confidence = 0.85
+        if sources != {"the_odds_api"}:
+            confidence = min(confidence, ESPN_MAX_CONFIDENCE)
 
         leg_details = [
             f"{leg.leg_type}({prob:.0%},ext)" for leg, prob in leg_probs
@@ -346,7 +353,8 @@ class SportsOddsModel(BaseModel):
             confidence=confidence,
             reasoning=(
                 f"Parlay {len(legs)} legs: {' × '.join(leg_details)} "
-                f"= {parlay_prob:.4f}; matched {len(legs)}/{len(legs)} legs"
+                f"= {parlay_prob:.4f}; matched {len(legs)}/{len(legs)} legs "
+                f"[{','.join(sorted(sources))}]"
             ),
-            data_sources=["odds_api"],
+            data_sources=sorted(sources),
         )

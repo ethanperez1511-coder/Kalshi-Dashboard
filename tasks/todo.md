@@ -263,3 +263,195 @@ Safety proof (CLAUDE.md): mode default 'paper' asserted by test; risk limits (3%
 asserted unchanged by test; single-writer via cron concurrency → no double-execution/over-exposure;
 Postgres transactional + unchanged get_session commit/rollback → no corruption. No live path touched.
 Evidence: full suite 250 passed (9 new). Real-Neon connection = task 9 (needs user DATABASE_URL).
+
+---
+
+# PHASE 1 — Fix the known bleeders (2026-08-11) — PLAN, NOT YET IMPLEMENTED
+
+Part of a 6-phase upgrade. Phase 1 adds no new money-touching model. Everything here either
+corrects wrong math, conserves a scarce resource, or TIGHTENS a match gate (fail-safe direction).
+
+## Safety statement (per CLAUDE.md)
+- No Phase 1 code path reads or writes `TradingSettings.mode`, `paper_trades_before_live`, or
+  `can_trade_live()`. Paper default structurally preserved.
+- Risk ceilings untouched (quarter-Kelly, 3%/trade, 25% exposure, 10% cluster, 5% daily, 20% breaker).
+- No mock/fallback data: every new source failure returns None, never a substituted number.
+- Schema changes are ADDITIVE ONLY (new nullable columns, new tables). No drops, no rewrites of
+  historical rows. Legacy rows keep today's exact behavior.
+- All three changes REDUCE the qualifying trade set or make PnL more conservative. Over-exposure
+  cannot worsen.
+
+## Bleeder B1 — live settlement PnL is fee-blind
+`src/portfolio/tracker.py:66`  →  `fee = kalshi_fee(...) if is_paper else 0.0`
+Paper subtracts a simulated entry fee; live subtracts nothing, because the real fee was paid on
+Kalshi at entry and never enters the DB. So live `Trade.realized_pnl` overstates by the true fee.
+Downstream contamination: `src/portfolio/metrics.py` (win rate, calibration error), the equity
+curve, and — the one that matters — the Kelly shrinkage multiplier in `src/risk/kelly.py:16`,
+which sizes real money off `realized_pnl`.
+Cash itself self-heals in live mode only because `sync_live_bankroll` (`engine.py:43`) overwrites
+bankroll from Kalshi each cycle. So this is reporting + sizing corruption, not cash corruption.
+Secondary: `_mark_trade_filled` (`engine.py:411`) debits `price*qty/100` with no fee, so the
+intra-cycle bankroll used by exposure checks before the next sync runs optimistic.
+
+## Bleeder B2 — the odds cache does not survive the process; quota burns ~288x/day
+`src/modeling/odds_api.py:31`  →  `_MODULE_CACHE: Dict[str, tuple] = {}`
+Module-level = in-process. The bot now runs as a GitHub Actions cron (`*/5 * * * *`), so EVERY
+CYCLE IS A FRESH PYTHON PROCESS and the cache is always empty. The 60-minute TTL is dead code in
+production. Burn: 288 runs/day x 3 sports = 864 req/day against a ~500/MONTH free tier. Quota dies
+in under a day, then SportsOddsModel silently returns None for the rest of the month.
+Second leak: models run BEFORE the filter (`scorer.py:117` dispatch, `:160` filter), so quota is
+spent on markets a volume/spread/expiry gate was always going to reject.
+
+## Bleeder B3 — Polymarket matching accepts direction-flipped and negated markets
+`src/modeling/models/polymarket.py:72`  →  `if _numbers_in(cand.question) != numbers: continue`
+Numeric TOKENS are compared, not the comparator attached to them:
+- "CPI above 3%" vs "CPI below 3%" → same tokens, same numbers, sim ~0.9 → MATCHED, and we ingest
+  a probability that means the opposite.
+- "Will X not happen by 2026" vs "Will X happen by 2026" → `not` is one token of ~8; survives 0.7.
+- Bare token sets are symmetric, so "Yankees beat Red Sox" ≡ "Red Sox beat Yankees".
+A wrong match is fabricated data pointed straight at the sizing engine. Highest severity in Phase 1.
+
+## Tasks — 1.1 fee-accurate settlement on both paths
+- [ ] `Trade.entry_fee: float | None` (dollars, nullable) — src/models/trade.py.
+- [ ] `src/database.py:ensure_schema(engine)` — additive migration (PRAGMA table_info on SQLite /
+      information_schema on Postgres → ALTER TABLE ADD COLUMN). No Alembic in this repo and
+      `create_all` cannot add columns to the existing 134k-row DB or to Neon. Idempotent, never drops.
+- [ ] Paper (`_execute_paper`): store `entry_fee = kalshi_fee(qty, price)` at fill time.
+- [ ] Live (`_mark_trade_filled`): real fee via `client.get_fills(order_id=...)` →
+      `sum(f.fee)/100.0` (KalshiFill.fee is cents, schemas.py:129). On fetch failure fall back to
+      the simulated fee and mark it an estimate — never 0.0. Also debit fee intra-cycle.
+- [ ] `close_position`: one formula both paths — `gross - (trade.entry_fee ?? kalshi_fee(...))`.
+      The `is_paper` branch disappears. `entry_fee is None` (legacy) keeps today's behavior exactly.
+- [ ] Tests (tests/test_settlement_fees.py): paper vs live with identical side/price/qty/outcome and
+      equal fees settle to IDENTICAL realized_pnl; real N-cent fill fee → `gross - N/100`;
+      `get_fills` raising → simulated fallback, never 0.0, no crash; legacy `entry_fee=None` row
+      settles exactly as on main; `ensure_schema` idempotent on a populated DB.
+
+## Tasks — 1.2 odds quota: persist, budget, gate, project, fall back
+- [ ] PERSIST THE CACHE (the fix that actually matters): table `odds_cache`
+      (sport_key, payload_json, fetched_at, source); DB first, module cache second.
+      Turns ~864 req/day into ~6.
+- [ ] Per-sport TTL: `TRADING_ODDS_TTL_<SPORT>`; default derived from budget
+      `ttl_hours = 24 * n_sports * 30 / monthly_cap` (3 sports / 500 cap → ~4.3h, ~210 req/mo).
+      Shorter TTL near tip-off, longer pre-game.
+- [ ] Budget before spend: table `odds_quota` (month, requests_used, cap); hard stop at cap;
+      reuse the existing `QUOTA_DEAD` dark-signal flag.
+- [ ] Gate before spend: extract `TradeFilter.prescreen(volume, spread_cents, hours_to_expiry)`
+      (market-only gates, no model input) and call it in scorer.py BEFORE model dispatch.
+      Prescreen is a strict SUBSET of existing gates — property test proves anything failing
+      prescreen also fails `evaluate()`, so trade decisions are provably unchanged.
+- [ ] Sport-demand filter: only fetch sport keys some prescreened Kalshi market references.
+- [ ] Second source behind an interface: `OddsSource` protocol (`fetch(sport_key) -> [GameOdds]`),
+      `TheOddsApiSource` + `EspnOddsSource` (site.api.espn.com scoreboard, free, no key). ESPN
+      usually carries one book → de-vigged the same way but confidence capped below the multi-book
+      path; `data_sources` records which source paid. Flag `TRADING_ENABLE_ESPN_ODDS` default OFF
+      until verified against live responses. If ESPN does not reliably carry moneyline for
+      MLB/NBA/NHL, ship interface + NullSource and SAY SO in the report — do not fake a source.
+- [ ] Quota API + widget: `GET /api/quota` (used, cap, burn/day, projected month-end, days to
+      exhaustion, per-source status) + `QuotaCard.tsx` on Overview.
+- [ ] Tests (tests/test_odds_quota.py): cold process + warm DB cache → ZERO HTTP calls (the cron
+      regression); budget exhausted → no HTTP, quota_dead set, model returns None; prescreen subset
+      property; scorer spends no quota on a prescreen failure; per-sport TTL refetches only the
+      expired sport; burn-rate projection against an injected clock.
+
+## Tasks — 1.3 Polymarket: entity match, blocklist, human review queue
+- [ ] `src/modeling/entities.py:extract(title) -> MarketEntities`
+      {teams_or_persons, dates(resolved), thresholds[(comparator, value, unit)], tickers,
+      negated, subject/object order}.
+- [ ] `compare(a, b) -> {match | conflict | insufficient}`. ANY conflicting field (opposite
+      comparator, different date, flipped negation, swapped subject/object) → hard reject
+      regardless of token similarity. `insufficient` → downgrade, never auto-accept.
+- [ ] Table `market_match_map` (kalshi_market_id UNIQUE, poly_condition_id, status
+      approved|blocked|pending, similarity, entities_json, decided_at). Approved → reuse forever,
+      skip fuzzy. Blocked → never match. Pending → NO ESTIMATE (fail closed).
+- [ ] `PolymarketModel.estimate`: map first → entity compare → similarity. Uncertain matches are
+      enqueued `pending` and return None.
+- [ ] API `GET /api/matches/pending`, `POST /api/matches/{id}/approve|block`.
+- [ ] Dashboard `Review.tsx` (TypeScript): side-by-side titles, the entity diff that triggered
+      review, volume, both prices, approve/block.
+- [ ] Tests (tests/test_polymarket_entities.py): "above 3%" vs "below 3%" rejected (regression for
+      the live bug); negation flip rejected; subject/object swap rejected; date mismatch rejected;
+      approved mapping reused without fuzzy; blocked pair never matched even at sim 1.0; pending →
+      estimate() returns None; existing test_polymarket_model.py still green.
+
+## Tasks — 1.4 close-out
+- [ ] Full suite green (250 existing + new).
+- [ ] PHASE_1_REPORT.md — changes, what is flagged off, manual steps (ESPN verification, review-queue
+      approvals; no new API keys required).
+- [ ] Append any correction from the user to tasks/lessons.md.
+
+## Lookahead / circularity audit (Phase 1)
+- No new probability source → no new circular-pricing risk.
+- Prescreen reorders WHEN gates run, never WHAT they decide (subset property test).
+- `market_match_map` is keyed on market identity only — stores no outcome, price, or
+  post-resolution data, so it cannot leak into a backtest.
+- Fee correction uses entry-time data only; no settlement-time info flows backward into sizing.
+
+## Open decisions — RESOLVED 2026-08-11 by user
+1. Corrections (fee math, entity conflict-rejection) ship ON. Genuinely new capability
+   (ESPN source, prescreen quota gating, review-queue behavior) stays behind flags default OFF.
+2. Uncertain Polymarket match → FAIL CLOSED. Pending pair produces no estimate until approved
+   in the review queue; approval is remembered forever.
+3. ESPN: probe the live endpoint first. Build EspnOddsSource only if moneyline is genuinely
+   carried for MLB/NBA/NHL; otherwise ship the OddsSource interface + NullSource and report it.
+
+## Review — COMPLETE 2026-08-11 (full detail in PHASE_1_REPORT.md)
+
+Suite: **325 passed** (250 before, 75 new). Frontend `tsc --noEmit` clean. FastAPI boots with
+the two new routers against the real DB.
+
+**1.1 fee accounting.** `Trade.entry_fee` + `entry_fee_source` recorded at fill (paper:
+simulated; live: real fee from `get_fills`, falling back to an estimate but never 0.0).
+Settlement uses one formula for both paths — the `is_paper` branch is gone from the PnL math.
+Found a SECOND bug while fixing: the live path debited the entry cost at fill and then credited
+`realized_pnl` (which contains that cost) at settlement — double-subtraction, masked by
+`sync_live_bankroll`. Fixed by moving the `is_paper` split to the cash ledger where it belongs:
+paper = equity-at-cost, moves once at settlement; live = real cash, cost+fee at fill, payout at
+settlement. Both net `gross - fee`.
+`ensure_schema()` added (no Alembic in repo; `create_all` cannot add columns). Rehearsed on a
+copy of the real 95MB DB: 11 trades / 6 positions / 134,950 markets in and out, legacy rows
+null, rerun a no-op. Also caught a pre-existing gap: `trading_settings.last_heartbeat_at` was
+missing from any pre-July database.
+Stale test `test_live_position_no_simulated_fee` superseded — it asserted the bug.
+
+**1.2 odds quota.** Root cause was worse than the free-tier size: the cache was a module-level
+dict, and the July move to a per-cycle Actions cron made it permanently empty — ~864 req/day
+against a ~500/month cap, TTL dead code. Cache moved to the DB (`odds_cache`), TTL derived from
+the budget (720h x n_sports / cap = ~4.3h, spends the cap exactly), ledger (`odds_quota`)
+charged before each request, `TradeFilter.prescreen()` for gating before model dispatch,
+`OddsSource` interface + ESPN fallback, `GET /api/quota` + QuotaCard.
+ESPN probed live before building: moneyline present for MLB/NBA/NHL but ONE book (DraftKings)
+and day-of-game only, so it ships default OFF and confidence-capped at 0.70. Three probe
+findings are each locked by a test — explicit `?dates=`, missing `odds` key on FINAL games, and
+the Akamai bot manager that 403s custom User-Agents.
+Regression test: cold process + warm DB cache makes ZERO HTTP calls.
+Prescreen proven decision-neutral by a grid property test.
+
+**1.3 Polymarket entities.** Demonstrated the live bug with real phrasing: "CPI above 3%" vs
+"CPI below 3%" scores 0.818 similarity with identical numeric tokens and MATCHED. Added
+`entities.py` (direction, magnitude, dates, negation, party order), `market_match_map`
+(approved/blocked/pending, fail-closed), review API + Review page.
+Then ran old vs new against 2,055 real Kalshi markets + 1,500 live Polymarket markets, which
+exposed a SECOND bug in my own first cut: "Alexandru Rafila" matched "Alexandru Nazare" — two
+different candidates — because I compared entity phrases and the intersection was non-empty.
+Accented names ("Cătălin") were mangled by the ASCII regex. Fixed with Unicode-aware extraction
+and per-token containment.
+Result on live data: 17 priced before -> 13 priced, 4 stopped. Two were different people (real
+saves); two are judgment calls (Eisenkot/Eizenkot transliteration, Taylor Swift wedding pair)
+now queued for review instead of traded blind.
+
+**Safety proof.** No Phase 1 code path reads or writes `mode`, `paper_trades_before_live`, or
+`can_trade_live()`. Risk ceilings untouched and still asserted by test_host_migration.py.
+Schema changes additive only. All three changes reduce the tradeable set or make PnL more
+conservative, so over-exposure cannot worsen. Real DB verified post-migration: counts
+unchanged, `PRAGMA integrity_check` ok, mode still `paper`, 11/50.
+
+**Flagged for a decision, not silently fixed:** `sync_live_bankroll` sets bankroll to Kalshi
+*cash*, while paper bankroll is equity-at-cost. Risk limits divide exposure by bankroll, so the
+25% cap binds earlier in live than in paper. Fail-safe direction, but it means the 50-trade
+paper evaluation does not transfer cleanly to live sizing. Predates this phase; recommend
+resolving before the live switch.
+
+**Deliberately not built:** sport-demand filtering (derived TTL already spends exactly the cap),
+live/pre-game TTL split (same budget), ESPN summary/core endpoints (only needed for Phase 4 CLV
+backfill).

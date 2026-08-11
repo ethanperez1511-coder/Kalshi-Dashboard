@@ -149,8 +149,15 @@ class TestLiveOrderPricing:
             trade = session.query(Trade).filter_by(market_id="TEST-MKT").one()
             assert trade.price == 49
             settings = session.query(TradingSettings).first()
-            # actual cost deducted: 49c x 3 = $1.47
-            assert settings.bankroll == pytest.approx(100.0 - 1.47)
+            # SUPERSEDED 2026-08-11 (Phase 1.5). This asserted the live path
+            # debited the fill cost here. It no longer does: bankroll is an
+            # equity-at-cost ledger on BOTH paths, untouched at fill (buying
+            # swaps cash for a position of equal cost) and moved only at
+            # settlement by realized PnL. Debiting on one path and not the
+            # other is what made live's bankroll incomparable to paper's, and
+            # every risk limit divides by it. Exposure is tracked by the
+            # Position rows, which this test already asserts above.
+            assert settings.bankroll == pytest.approx(100.0)
 
 
 # --- B4: partial fill at timeout records the filled portion ---

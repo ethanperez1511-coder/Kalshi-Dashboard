@@ -1,19 +1,43 @@
-"""Client for The Odds API (the-odds-api.com) — free tier."""
+"""Odds fetching: what to fetch, when, and out of whose budget.
+
+The provider-specific HTTP lives in `odds_sources`; the cross-process cache and
+quota ledger live in `odds_store`. This module owns the policy that ties them
+together.
+
+History worth keeping: the cache here used to be a module-level dict. That was
+correct for a long-running process and became silently useless the moment the
+bot moved to a per-cycle GitHub Actions cron — every tick got a fresh
+interpreter, so the TTL never applied and ~864 requests/day went out against a
+~500/month allowance. The module cache is still here, but only as a
+within-cycle shortcut in front of the database.
+"""
 from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from typing import Callable, Dict, List, Optional
 
 import httpx
 
+from src.modeling.odds_sources import (
+    EspnOddsSource,
+    QuotaExhausted,
+    TheOddsApiSource,
+    _american_to_prob,
+)
+from src.modeling.odds_store import (
+    OddsCacheStore,
+    QuotaLedger,
+    default_ttl_seconds,
+    month_key,
+)
+
 logger = logging.getLogger(__name__)
 
-_BASE_URL = "https://api.the-odds-api.com/v4"
-
-# Default sports keys for major US leagues. The free quota is tiny (500/mo), so
-# the pipeline passes only in-season leagues via TRADING_ODDS_SPORT_KEYS.
+# Default sports keys for major US leagues. The free quota is tiny, so the
+# pipeline passes only in-season leagues via TRADING_ODDS_SPORT_KEYS.
 SPORT_KEYS = [
     "basketball_nba",
     "baseball_mlb",
@@ -25,11 +49,16 @@ SPORT_KEYS = [
     "tennis_wta_french_open",
 ]
 
-# Module-level cache shared across OddsClient instances (a fresh client is built
-# every pipeline cycle). Without this, every cycle re-burns the monthly quota.
+# Within-cycle shortcut only. The durable cache is the DB — see odds_store.
 # Maps cache-key -> (fetched_at_monotonic, [GameOdds]).
 _MODULE_CACHE: Dict[str, tuple] = {}
-_CACHE_TTL_SECONDS = 3600  # overridden per-client below
+_CACHE_TTL_SECONDS = 3600
+
+# When every source fails, odds this old may still be served rather than going
+# dark. These are real observed quotes, not synthetic data; SportsOddsModel
+# separately refuses any game that has already commenced, which is the failure
+# mode stale odds actually cause.
+_MAX_STALE_SECONDS = 12 * 3600
 
 
 def _clear_module_cache() -> None:
@@ -53,14 +82,10 @@ class GameOdds:
     totals: Dict[str, float]  # e.g. {"over_220.5": 0.52, "under_220.5": 0.48}
     spreads: Dict[str, float]  # e.g. {"Cleveland -5.5": 0.55}
     commence_time: str
-
-
-def _american_to_prob(odds: int) -> float:
-    """Convert American odds to implied probability."""
-    if odds > 0:
-        return 100.0 / (odds + 100.0)
-    else:
-        return abs(odds) / (abs(odds) + 100.0)
+    # Provenance. A single-book quote is weaker evidence than a multi-book
+    # consensus, and the consuming model discounts its confidence accordingly.
+    source: str = "the_odds_api"
+    book_count: int = 0
 
 
 def _remove_vig(probs: List[float]) -> List[float]:
@@ -83,9 +108,7 @@ def devig_two_way(p_yes: float, p_no: float) -> tuple:
     return (p_yes / total, p_no / total)
 
 
-def devig_book_then_average(
-    book_outcomes: List[List[float]],
-) -> List[float]:
+def devig_book_then_average(book_outcomes: List[List[float]]) -> List[float]:
     """De-vig each bookmaker separately, then average across books.
 
     book_outcomes: list of [p_yes, p_no] pairs from each bookmaker.
@@ -110,26 +133,73 @@ class OddsClient:
         self,
         api_key: str,
         sport_keys: Optional[List[str]] = None,
-        ttl_seconds: int = _CACHE_TTL_SECONDS,
+        ttl_seconds: Optional[int] = None,
         http=httpx,
+        engine=None,
+        now: Optional[Callable[[], datetime]] = None,
+        monthly_cap: Optional[int] = None,
+        enable_espn: Optional[bool] = None,
     ):
+        from src.trading_config import ENABLE_ESPN_ODDS, ODDS_MONTHLY_QUOTA
+
         self._api_key = api_key
         self._sport_keys = sport_keys if sport_keys is not None else SPORT_KEYS
-        self._ttl = ttl_seconds
         self._http = http
-        # True once a 401/quota response is seen — lets the pipeline alert that
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._cap = monthly_cap if monthly_cap is not None else ODDS_MONTHLY_QUOTA
+        self._enable_espn = ENABLE_ESPN_ODDS if enable_espn is None else enable_espn
+        self._ttl = (
+            ttl_seconds
+            if ttl_seconds is not None
+            else default_ttl_seconds(len(self._sport_keys), self._cap)
+        )
+        self._store = OddsCacheStore(engine) if engine is not None else None
+        self._ledger = QuotaLedger(engine, cap=self._cap) if engine is not None else None
+        # True once a quota/auth failure is seen — lets the pipeline alert that
         # the sports model has gone dark instead of failing silently.
         self.quota_dead = False
+
+    # -- sources ---------------------------------------------------------
+
+    def _primary(self) -> Optional[TheOddsApiSource]:
+        return TheOddsApiSource(self._api_key, http=self._http) if self._api_key else None
+
+    def _fallback(self) -> Optional[EspnOddsSource]:
+        if not self._enable_espn:
+            return None
+        return EspnOddsSource(http=self._http, now=self._now)
+
+    # -- cache -----------------------------------------------------------
 
     def _cache_key(self) -> str:
         return f"{self._api_key}|{','.join(sorted(self._sport_keys))}"
 
-    def get_all_odds(self) -> List[GameOdds]:
-        """Fetch odds for the configured sports, served from a TTL cache.
+    def clear_cache(self):
+        _MODULE_CACHE.pop(self._cache_key(), None)
 
-        The cache spans client instances so consecutive pipeline cycles don't
-        each spend the monthly quota.
-        """
+    def _from_store(self, sport_key: str, now: datetime, allow_stale: bool = False):
+        """Parsed games from the DB cache, or None if absent/too old."""
+        if self._store is None:
+            return None
+        cached = self._store.get(sport_key)
+        if cached is None:
+            return None
+        fetched_at, payload, _source = cached
+        age = (now - fetched_at).total_seconds()
+        limit = _MAX_STALE_SECONDS if allow_stale else self._ttl
+        if age >= limit:
+            return None
+        if allow_stale and age >= self._ttl:
+            logger.warning(
+                f"Serving {sport_key} odds {age / 3600:.1f}h old — every source failed"
+            )
+        return [GameOdds(**g) for g in payload]
+
+    # -- fetching --------------------------------------------------------
+
+    def get_all_odds(self) -> List[GameOdds]:
+        """Odds for the configured sports, spending as little quota as possible."""
+        now = self._now()
         key = self._cache_key()
         cached = _MODULE_CACHE.get(key)
         if cached is not None:
@@ -139,46 +209,79 @@ class OddsClient:
 
         all_games: List[GameOdds] = []
         for sport_key in self._sport_keys:
-            all_games.extend(self._fetch_sport(sport_key))
+            all_games.extend(self._odds_for_sport(sport_key, now))
 
-        # Only cache a successful fetch — caching an empty quota-dead result
-        # would hide recovery when the quota resets.
         if not self.quota_dead:
             _MODULE_CACHE[key] = (time.monotonic(), all_games)
         return all_games
 
-    def clear_cache(self):
-        _MODULE_CACHE.pop(self._cache_key(), None)
+    def _odds_for_sport(self, sport_key: str, now: datetime) -> List[GameOdds]:
+        fresh = self._from_store(sport_key, now)
+        if fresh is not None:
+            logger.debug(f"Odds cache hit for {sport_key} — no request spent")
+            return fresh
 
-    def _fetch_sport(self, sport_key: str) -> List[GameOdds]:
-        """Fetch moneyline + totals + spreads for a sport."""
-        try:
-            resp = self._http.get(
-                f"{_BASE_URL}/sports/{sport_key}/odds",
-                params={
-                    "apiKey": self._api_key,
-                    "regions": "us",
-                    "markets": "h2h,totals,spreads",
-                    "oddsFormat": "american",
-                },
-                timeout=15.0,
-            )
-            if resp.status_code in (401, 429):
-                logger.warning(f"Odds API: quota exhausted or invalid key ({resp.status_code})")
-                self.quota_dead = True
-                global QUOTA_DEAD
-                QUOTA_DEAD = True
-                return []
-            if resp.status_code == 422:
-                logger.debug(f"Odds API: sport {sport_key} not available")
-                return []
-            if resp.status_code != 200:
-                logger.warning(f"Odds API: {sport_key} returned {resp.status_code}")
-                return []
-            return self._parse_response(resp.json(), sport_key)
-        except httpx.HTTPError as e:
-            logger.warning(f"Odds API error for {sport_key}: {e}")
-            return []
+        for source in (self._primary(), self._fallback()):
+            if source is None:
+                continue
+            if source.costs_quota and not self._may_spend(source.name, now):
+                continue
+            try:
+                games = self._fetch(source, sport_key, now)
+            except QuotaExhausted:
+                logger.warning(
+                    f"{source.name}: quota exhausted or key invalid — marking dark"
+                )
+                self._mark_quota_dead(source.name, now)
+                continue
+            except Exception:
+                logger.warning(f"{source.name}: fetch failed for {sport_key}", exc_info=True)
+                continue
+            if games:
+                return games
+
+        # Every source failed. Real-but-stale beats going dark; the model still
+        # refuses any game that has already started.
+        stale = self._from_store(sport_key, now, allow_stale=True)
+        return stale or []
+
+    def _may_spend(self, source_name: str, now: datetime) -> bool:
+        if self._ledger is None:
+            return True
+        if self._ledger.remaining(month_key(now), source_name) <= 0:
+            logger.warning(f"{source_name}: monthly quota spent — not requesting")
+            self._mark_quota_dead(source_name, now, exhaust_ledger=False)
+            return False
+        return True
+
+    def _fetch(self, source, sport_key: str, now: datetime) -> List[GameOdds]:
+        if source.costs_quota and self._ledger is not None:
+            # Charge before the call: an over-count costs one skipped refresh,
+            # an under-count costs a month of blindness.
+            self._ledger.charge(month_key(now), source.name, 1)
+
+        raw = source.fetch(sport_key)
+        games = (
+            self._parse_response(raw, sport_key)
+            if source.name == "the_odds_api"
+            else list(raw)
+        )
+        if games and self._store is not None:
+            self._store.put(sport_key, source.name, [asdict(g) for g in games], now)
+        return games
+
+    def _mark_quota_dead(self, source_name: str, now: datetime, exhaust_ledger: bool = True):
+        self.quota_dead = True
+        global QUOTA_DEAD
+        QUOTA_DEAD = True
+        if exhaust_ledger and self._ledger is not None:
+            # The provider says we are done for the month; stop asking.
+            month = month_key(now)
+            spent = self._ledger.used(month, source_name)
+            if spent < self._cap:
+                self._ledger.charge(month, source_name, self._cap - spent)
+
+    # -- the-odds-api parsing --------------------------------------------
 
     def _parse_response(self, data: list, sport_key: str) -> List[GameOdds]:
         games: List[GameOdds] = []
@@ -191,27 +294,24 @@ class OddsClient:
             totals = self._extract_totals(event)
             spreads = self._extract_spreads(event)
 
-            home_prob = h2h_probs.get(home, 0.5)
-            away_prob = h2h_probs.get(away, 0.5)
-            draw_prob = h2h_probs.get("Draw", 0.0)
-
             games.append(GameOdds(
                 sport=sport_key,
                 home_team=home,
                 away_team=away,
-                home_win_prob=home_prob,
-                away_win_prob=away_prob,
-                draw_prob=draw_prob,
+                home_win_prob=h2h_probs.get(home, 0.5),
+                away_win_prob=h2h_probs.get(away, 0.5),
+                draw_prob=h2h_probs.get("Draw", 0.0),
                 totals=totals,
                 spreads=spreads,
                 commence_time=commence,
+                source="the_odds_api",
+                book_count=len(event.get("bookmakers", [])),
             ))
         logger.debug(f"Odds API: {len(games)} games for {sport_key}")
         return games
 
     def _extract_h2h(self, event: dict) -> Dict[str, float]:
         """De-vig each bookmaker separately, then average across books."""
-        # Collect per-book outcome sets: [{name: prob}, ...]
         per_book: List[Dict[str, float]] = []
         for book in event.get("bookmakers", []):
             for market in book.get("markets", []):
@@ -221,7 +321,6 @@ class OddsClient:
                 for outcome in market.get("outcomes", []):
                     book_probs[outcome["name"]] = _american_to_prob(outcome["price"])
                 if book_probs:
-                    # De-vig this book: normalize to sum to 1
                     total = sum(book_probs.values())
                     if total > 0:
                         book_probs = {k: v / total for k, v in book_probs.items()}
@@ -230,7 +329,6 @@ class OddsClient:
         if not per_book:
             return {}
 
-        # Average de-vigged probs across books
         all_names = set()
         for bp in per_book:
             all_names.update(bp.keys())
@@ -239,26 +337,22 @@ class OddsClient:
         for name in all_names:
             vals = [bp[name] for bp in per_book if name in bp]
             avg_probs[name] = sum(vals) / len(vals) if vals else 0.0
-
         return avg_probs
 
     def _extract_totals(self, event: dict) -> Dict[str, float]:
         """Extract over/under totals, de-vig per book then average."""
-        # Collect per-book over/under pairs grouped by point
-        # Structure: {point: [{over: prob, under: prob}, ...]}
         per_book_by_point: Dict[float, List[Dict[str, float]]] = {}
         for book in event.get("bookmakers", []):
             for market in book.get("markets", []):
                 if market["key"] != "totals":
                     continue
-                # Group outcomes by point within this book
                 book_points: Dict[float, Dict[str, float]] = {}
                 for outcome in market.get("outcomes", []):
                     point = outcome.get("point", 0)
                     name = outcome["name"].lower()  # "over" or "under"
-                    prob = _american_to_prob(outcome["price"])
-                    book_points.setdefault(point, {})[name] = prob
-                # De-vig each pair
+                    book_points.setdefault(point, {})[name] = _american_to_prob(
+                        outcome["price"]
+                    )
                 for point, probs in book_points.items():
                     if "over" in probs and "under" in probs:
                         total = probs["over"] + probs["under"]
@@ -273,7 +367,6 @@ class OddsClient:
                 vals = [bp[direction] for bp in book_list if direction in bp]
                 if vals:
                     result[f"{direction}_{point}"] = sum(vals) / len(vals)
-
         return result
 
     def _extract_spreads(self, event: dict) -> Dict[str, float]:
@@ -285,12 +378,8 @@ class OddsClient:
                     continue
                 for outcome in market.get("outcomes", []):
                     point = outcome.get("point", 0)
-                    name = outcome["name"]
-                    key = f"{name} {point:+.1f}"
-                    prob = _american_to_prob(outcome["price"])
-                    spread_odds.setdefault(key, []).append(prob)
-
-        result: Dict[str, float] = {}
-        for key, probs in spread_odds.items():
-            result[key] = sum(probs) / len(probs)
-        return result
+                    key = f"{outcome['name']} {point:+.1f}"
+                    spread_odds.setdefault(key, []).append(
+                        _american_to_prob(outcome["price"])
+                    )
+        return {k: sum(v) / len(v) for k, v in spread_odds.items()}

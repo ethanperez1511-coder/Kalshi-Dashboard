@@ -25,6 +25,14 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install .
+      # Schema changes are applied here, as their own deliberate step. Neither
+      # the pipeline nor the dashboard migrates on startup — they report a stale
+      # schema and refuse. Additive-only and idempotent, so a no-op run costs
+      # one query.
+      - name: Apply pending schema migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.migrate
       - name: Run one paper-trading cycle
         env:
           # Data-only secrets. NONE of these enable live mode — `mode` lives in the

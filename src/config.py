@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     WS_PRICE_INTERVAL_SECONDS: int = 10
     KALSHI_BASE_URL: str = "https://api.elections.kalshi.com/trade-api/v2"
     KALSHI_WS_URL: str = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+    # A schema migration is a deliberate act. Starting a process must never
+    # alter the database it was pointed at — run `python -m src.migrate`.
+    # Left False, a stale schema is logged as an error and the process refuses
+    # to run rather than silently migrating.
+    MIGRATE_ON_BOOT: bool = False
 
     @property
     def is_offline_mode(self) -> bool:

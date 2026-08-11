@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import List
+from datetime import datetime, timezone
+from typing import List, Optional
 
 import httpx
 
@@ -19,6 +20,14 @@ class PolyMarket:
     question: str
     yes_price: float  # 0..1
     volume_usd: float
+    # Stable Polymarket identity. A human-approved Kalshi↔Polymarket mapping is
+    # stored against this, so it must not be the question text — wording drifts.
+    condition_id: str = ""
+    # Resolution horizon. Two contracts can name the same event and still be
+    # different questions: "next PM, ever" is not "next PM by end-2026". The
+    # shorter-dated one is bounded below the longer, always in the same
+    # direction, so the gap reads as edge rather than as a mismatch.
+    end_date: Optional[datetime] = None
 
 
 class PolymarketClient:
@@ -90,4 +99,18 @@ class PolymarketClient:
             question=question,
             yes_price=yes_price,
             volume_usd=float(row.get("volumeNum", 0.0) or 0.0),
+            condition_id=str(row.get("conditionId") or row.get("id") or ""),
+            end_date=_parse_end_date(row.get("endDate")),
         )
+
+
+def _parse_end_date(raw) -> Optional[datetime]:
+    """Gamma's ISO-8601 endDate, or None. An unparseable date is not a guess."""
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        logger.debug("Polymarket: unparseable endDate %r", raw)
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)

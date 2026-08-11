@@ -196,8 +196,12 @@ class TestExecuteLive:
             assert pos is not None
             assert pos.status == "open"
 
+            # SUPERSEDED 2026-08-11 (Phase 1.5): the fill no longer debits the
+            # bankroll on either path. It is an equity-at-cost ledger that moves
+            # only at settlement; the open position above is what carries the
+            # exposure. See tests/test_equity_semantics.py.
             settings = session.query(TradingSettings).first()
-            assert settings.bankroll < 100.0  # deducted
+            assert settings.bankroll == 100.0
 
     def test_live_timeout_cancelled(self, db_engine):
         """Order times out → cancelled."""

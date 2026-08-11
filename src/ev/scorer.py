@@ -18,8 +18,9 @@ from src.trading_config import (
     MAX_SPREAD_CENTS,
     MAX_SNAPSHOT_AGE_MINUTES,
     MAX_DAYS_TO_EXPIRY,
-    ODDS_CACHE_TTL_MINUTES,
     ODDS_SPORT_KEYS,
+    ODDS_TTL_MINUTES_OVERRIDE,
+    PRESCREEN_BEFORE_MODELS,
 )
 from src.models.market import Market
 from src.models.opportunity import Opportunity
@@ -37,11 +38,19 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
     5. Return a list of result dicts.
     """
     settings = Settings()
+    # Passing the engine is what makes the odds cache and quota ledger survive
+    # the process — this pipeline is a fresh interpreter on every cron tick.
+    # ttl_seconds=None lets the client derive a TTL that fits the monthly cap.
     odds_client = (
         OddsClient(
             settings.ODDS_API_KEY,
             sport_keys=[s.strip() for s in ODDS_SPORT_KEYS.split(",") if s.strip()],
-            ttl_seconds=ODDS_CACHE_TTL_MINUTES * 60,
+            ttl_seconds=(
+                ODDS_TTL_MINUTES_OVERRIDE * 60
+                if ODDS_TTL_MINUTES_OVERRIDE > 0
+                else None
+            ),
+            engine=engine,
         )
         if settings.ODDS_API_KEY
         else None
@@ -113,6 +122,25 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
             if age_minutes > MAX_SNAPSHOT_AGE_MINUTES:
                 continue
 
+        # --- Step 2b: market-only gates, computed before any model runs ---
+        now = datetime.now(timezone.utc)
+        if close_date.tzinfo is None:
+            close_date = close_date.replace(tzinfo=timezone.utc)
+        hours_to_expiry = max(0.0, (close_date - now).total_seconds() / 3600.0)
+        spread_cents = yes_ask - yes_bid
+
+        # Optional: skip model dispatch for markets that cannot qualify anyway.
+        # Model dispatch can spend a metered odds request, and spending it on a
+        # market that fails a liquidity gate is pure waste. prescreen() only
+        # duplicates gates evaluate() already applies, so no decision changes —
+        # but the market gets no Opportunity row, so this is opt-in.
+        if PRESCREEN_BEFORE_MODELS and not trade_filter.prescreen(
+            daily_volume=volume,
+            bid_ask_spread_cents=spread_cents,
+            hours_to_expiry=hours_to_expiry,
+        ):
+            continue
+
         # --- Step 3: run models (first non-None wins) ---
         models = registry.get_models_for(category)
         model_result = None
@@ -146,15 +174,7 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
             yes_ask=yes_ask,
         )
 
-        # --- Step 5: calculate hours_to_expiry ---
-        now = datetime.now(timezone.utc)
-        # Ensure close_date is timezone-aware
-        if close_date.tzinfo is None:
-            close_date = close_date.replace(tzinfo=timezone.utc)
-        hours_to_expiry = max(0.0, (close_date - now).total_seconds() / 3600.0)
-
-        # --- Step 6: run TradeFilter ---
-        spread_cents = yes_ask - yes_bid
+        # --- Step 6: run TradeFilter (hours_to_expiry/spread computed above) ---
         # Price-derived models use a higher edge threshold
         min_edge_override = PRICE_DERIVED_MIN_EDGE if winning_model_type == MODEL_TYPE_PRICE_DERIVED else None
         filter_result = trade_filter.evaluate(

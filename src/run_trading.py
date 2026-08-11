@@ -10,12 +10,13 @@ import time
 
 from src.alerts import Alerter
 from src.config import Settings
-from src.database import get_engine, Base
+from src.database import get_engine, verify_or_migrate
 from src.demo.seed import seed_demo_data
 from src.ingestion.live_ingest import ingest_live_markets
 from src.ev.calculator import EVResult
 from src.ev.scorer import score_all_markets
 from src.kalshi.client import KalshiClient
+from src.modeling.match_seed import apply_seed_decisions
 from src.models.settings import TradingSettings
 from src.portfolio.tracker import PortfolioTracker
 from src.risk.manager import RiskManager
@@ -41,7 +42,10 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     alerter = alerter or Alerter()
     settings = Settings()
     engine = get_engine(settings.DATABASE_URL)
-    Base.metadata.create_all(engine)
+    # Refuses to trade against a schema it does not recognise rather than
+    # migrating on the way past. The Actions workflow runs `python -m
+    # src.migrate` as its own explicit step before this.
+    verify_or_migrate(engine, migrate=settings.MIGRATE_ON_BOOT, context="the trading pipeline")
 
     # Seed demo data if offline, otherwise fetch live markets
     if settings.is_offline_mode:
@@ -50,6 +54,10 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     else:
         logger.info("Online mode — fetching live markets from Kalshi")
         ingest_live_markets(engine, settings)
+
+    # Human match verdicts live in the repo so they reach Neon, which is only
+    # writable from this runner. Idempotent; never overrides a dashboard decision.
+    apply_seed_decisions(engine)
 
     # Ensure trading settings exist (bankroll=$100, paper mode)
     ts = TradingSettings.get_or_create(engine)
