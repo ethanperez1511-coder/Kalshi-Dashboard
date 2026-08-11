@@ -237,3 +237,42 @@ class TestDay7Labelling:
         stats = measure(engine)["Sports"]
         assert stats["projectable"] is True
         assert stats["days_to_sample"] is not None
+
+
+# --------------------------------------------------------------------------
+# 4. Deployed-commit reporting — "committed" is not "deployed"
+# --------------------------------------------------------------------------
+
+class TestDeployedCommitReporting:
+    """Thirteen commits once sat unpushed while every report said 'shipped'.
+
+    The guard is that the heartbeat states which commit is running, so drift is
+    visible in the same message that claims health.
+    """
+
+    def test_reports_the_sha_when_running_in_actions(self, monkeypatch):
+        from src.alerts import _deployed_line
+
+        monkeypatch.setenv("GITHUB_SHA", "def6f98abcdef1234567890")
+        monkeypatch.setenv("GITHUB_REF_NAME", "main")
+        line = _deployed_line()
+        assert "def6f98a" in line
+        assert "main" in line
+
+    def test_absence_of_sha_is_itself_the_signal(self, monkeypatch):
+        """A local run must not look like a deployed one — that is exactly the
+        confusion that let production run month-old code."""
+        from src.alerts import _deployed_line
+
+        monkeypatch.delenv("GITHUB_SHA", raising=False)
+        assert "NOT a CI run" in _deployed_line()
+
+    def test_heartbeat_carries_the_deploy_line(self, monkeypatch):
+        from src.alerts import Alerter
+
+        sent = []
+        monkeypatch.setenv("GITHUB_SHA", "abc1234567")
+        alerter = Alerter(token="t", chat_id="c")
+        monkeypatch.setattr(alerter, "send", lambda text: sent.append(text))
+        alerter.heartbeat(100.0, 11, 50)
+        assert "🏷 deploy: abc12345" in sent[0]

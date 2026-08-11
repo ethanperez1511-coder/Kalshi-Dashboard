@@ -201,3 +201,26 @@ Four instances of this, all caught late, all in this codebase:
   landed, bytes written, count non-zero — not on the absence of an exception.
 - Prefer checks whose failure is loud by construction: a stale fit that makes
   cells unpriceable, a recorder that exits non-zero when it wrote nothing.
+
+## L13 — "Committed" and "deployed" are different outcomes.
+
+Thirteen commits sat on a local branch for a full working session while I
+reported each one as shipped. Production ran July code the whole time: broken
+RSA auth, fee-blind settlement, the old Polymarket matcher with the horizon bug,
+no weather, no recorder. Every "verified live" claim was true of my laptop and
+false of the system that trades.
+
+It is a direct instance of the pinned principle. Nothing checked that the thing
+described as deployed was deployed, so the gap could not fail — it could only be
+noticed, and only by someone looking at the Actions tab.
+
+**Rule:** a change is not shipped until it is on origin AND observed running.
+After any commit that adds a workflow, a migration, or a scheduled job, verify
+against the remote rather than the working tree:
+
+    git log origin/main..HEAD --oneline        # must be empty
+    git ls-tree --name-only origin/main .github/workflows/
+
+And the standing guard: the daily digest reports the DEPLOYED commit hash from
+GITHUB_SHA, so local-versus-production drift is visible in the same message that
+claims the system is healthy, instead of being assumed.

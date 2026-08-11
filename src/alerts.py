@@ -23,6 +23,21 @@ def _send(token: str, chat_id: str, text: str) -> None:
         logger.warning(f"Telegram alert failed: {e}")
 
 
+def _deployed_line() -> str:
+    """Which commit is actually running.
+
+    Thirteen commits once sat unpushed for a whole session while every report
+    said "shipped"; production ran month-old code with broken auth. Nothing
+    checked, so nothing could fail. GITHUB_SHA is set by Actions, so its
+    ABSENCE is itself the signal that this is not a deployed run.
+    """
+    sha = os.environ.get("GITHUB_SHA", "")
+    ref = os.environ.get("GITHUB_REF_NAME", "")
+    if not sha:
+        return "🏷 deploy: NOT a CI run (no GITHUB_SHA) — running outside Actions"
+    return f"🏷 deploy: {sha[:8]}" + (f" on {ref}" if ref else "")
+
+
 class Alerter:
     def __init__(self, token: str = "", chat_id: str = ""):
         self._token = token or os.environ.get("TELEGRAM_TOKEN", "")
@@ -101,6 +116,7 @@ class Alerter:
 
         if weather:
             lines.append(weather)
+        lines.append(_deployed_line())
         lines.append("(daily heartbeat)")
         self.send("\n".join(lines))
 
