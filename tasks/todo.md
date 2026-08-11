@@ -542,6 +542,67 @@ is a complete partition: `<84`, `[84,85]`, `[86,87]`, `[88,89]`, `[90,91]`, `>91
 Initially these were counted as parse failures, which made the coverage metric lie (a modelling
 gap reported as a broken parser). Now a distinct `TERMS_UNSUPPORTED` state.
 
+## Decisions taken 2026-08-11 (after the weather-API probe)
+
+### Data source: NWS primary, Open-Meteo paper-only
+Open-Meteo's free tier is CC-BY-4.0 **non-commercial** — unacceptable behind real capital. NWS is
+US-government public domain AND is the settlement source, so forecast and truth come from one
+provider. Confirmed from the contract text itself: every series settles on the **NWS
+Climatological Report (Daily)** at a named station — Central Park, **Chicago MIDWAY (not
+O'Hare)**, Miami International, Denver, Austin Bergstrom, LA Airport, Philadelphia International.
+The rules also state "is greater than 90°" / "is less than 99°" verbatim, independently
+confirming the strict-inequality boundary the 2.0 parser encodes.
+Open-Meteo stays for backfill/research while in paper mode. Resolve before the live flip.
+
+### Model architecture: deterministic forecast + σ fitted per lead
+Not a shortcut — it is the only architecture NWS supports (deterministic temperature only; the
+sole probabilistic fields are precipitation/thunder/wind). Historical ensemble members are not
+retrievable from Open-Meteo either: a rolling ~3–4 day window that fails **silently**, returning
+HTTP 200 with null members. Any ingest asserts non-null and documented member count rather than
+trusting the status code.
+Baseline is already validated end to end: fit Jun–Jul 2025, out-of-sample Aug 2025, 549
+forecast-strike pairs → **Brier 0.0994 vs climatology 0.2475, skill 0.598**; tails well
+calibrated, mid-range slightly overconfident (variance inflation).
+
+### Phase 2 report must state plainly
+Dispersion is **estimated from historical forecast error, not observed**. Flow-dependent
+uncertainty — knowing a confident day from an uncertain one — is the known gap, and the ensemble
+challenger below is the planned fix. This goes in the report as a limitation, not a footnote.
+
+## Tasks — 2.1 (current)
+- [ ] `src/weather/stations.py` — series → (station, lat/lon, timezone). Config map, NOT inferred,
+      with a test asserting the live rules text still names the expected station so a Kalshi change
+      breaks a test instead of silently mispricing.
+- [ ] NWS client. User-Agent is MANDATORY (403 Access Denied without one, not a 400). Deterministic
+      gridpoint forecast + the CLI product as settlement truth.
+- [ ] Truth series from the **CLI product**, not station observations. Measured gap, Open-Meteo grid
+      vs KNYC ASOS: mean bias +1.50 °F, MAE 1.70, max 3.3 — and settlement is CLI, so ASOS is
+      itself a proxy. Against 1-degree buckets a 1.5 °F bias dominates every modelling refinement.
+- [ ] Model: P(T > strike) from a normal around the deterministic forecast with σ fitted per
+      (station, lead). Integer settlement + strict inequality ⇒ P(T ≥ strike + 1).
+- [ ] Calibration harness: walk-forward, fitted strictly on data preceding each evaluation window.
+      Brier, Brier skill vs climatology, reliability bins, PIT.
+- [ ] Promotion gate IN CODE next to the climatology gate: confidence stays at the price-derived
+      tier until BSS > 0 vs climatology and reliability slope within tolerance on HELD-OUT data.
+
+## Tasks — 2.2 GEFS ensemble PROBE (gate before any build)
+Do NOT build the dynamical.org path yet. Probe first, same discipline as the ESPN and Open-Meteo
+probes. Acceptance criteria, all required:
+- [ ] Archive contains real forecast-as-issued members — member count as documented (GEFS 31,
+      ECMWF IFS ENS 51), not silently truncated.
+- [ ] RMSE grows monotonically with lead time. Reanalysis cannot do this, so it is the test that
+      the data is a forecast and not a hindcast — the same check that validated
+      `temperature_2m_previous_dayN`.
+- [ ] No silent-null failure mode. Out-of-range requests must error, not return 200 with nulls.
+- [ ] Confirm the Python 3.11+ (zarr v3) constraint is CI-only. CI runs 3.12; this machine is
+      3.9.6. Nothing in local tooling or the test suite may depend on it before that is settled.
+- [ ] Licence check on the hosting terms, not just on NOAA's underlying public-domain data.
+
+Only if the probe passes does GEFS get built — and then as a **scored challenger**: same held-out
+window, and it must BEAT the deterministic baseline's Brier skill to be promoted. That bar is
+recorded in code beside the climatology gate, so promotion is a measurement rather than an
+opinion.
+
 ## Review
 _(filled after implementation, with the calibration evidence)_
 
