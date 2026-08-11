@@ -1,0 +1,38 @@
+name: maintenance
+
+# One-shot operations, dispatched deliberately. Never scheduled: a maintenance
+# job that can close positions on a timer is a trading strategy nobody
+# approved.
+#
+# Run it with no input first — that is a dry run and writes the full production
+# trade record to the run summary. Only re-run with the exact confirmation
+# token once the report has been read.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type CLOSE-LEGACY-POSITIONS to execute. Leave blank for a dry run."
+        required: false
+        default: ""
+
+concurrency:
+  group: maintenance
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install .
+      - name: Reconcile (and unwind only if confirmed)
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          KALSHI_API_KEY: ${{ secrets.KALSHI_API_KEY }}
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY_B64 }}
+        run: python -m src.maintenance --confirm "${{ inputs.confirm }}"
