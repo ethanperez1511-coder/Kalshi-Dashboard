@@ -9,7 +9,7 @@ import signal
 import time
 
 from src.alerts import Alerter
-from src.config import Settings
+from src.config import Settings, require_production_database
 from src.database import get_engine, verify_or_migrate
 from src.demo.seed import seed_demo_data
 from src.ingestion.live_ingest import ingest_live_markets
@@ -52,6 +52,7 @@ def _handle_signal(signum, frame):
 def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     alerter = alerter or Alerter()
     settings = Settings()
+    require_production_database(settings.DATABASE_URL)
     engine = get_engine(settings.DATABASE_URL)
     # Refuses to trade against a schema it does not recognise rather than
     # migrating on the way past. The Actions workflow runs `python -m

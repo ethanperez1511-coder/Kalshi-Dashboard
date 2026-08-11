@@ -18,7 +18,7 @@ import asyncio
 import logging
 import sys
 
-from src.config import Settings
+from src.config import Settings, require_production_database
 from src.database import get_engine, verify_or_migrate
 from src.kalshi.auth import KalshiAuth
 from src.recorder.book_recorder import BookRecorder, markets_to_record

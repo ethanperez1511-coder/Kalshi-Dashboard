@@ -14,7 +14,7 @@ import argparse
 import logging
 import sys
 
-from src.config import Settings
+from src.config import Settings, require_production_database
 from src.database import get_engine, verify_or_migrate
 from src.maintenance.legacy_positions import (
     CONFIRM_TOKEN,
@@ -36,6 +36,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     settings = Settings()
+    require_production_database(settings.DATABASE_URL)
     engine = get_engine(settings.DATABASE_URL)
     verify_or_migrate(engine, migrate=settings.MIGRATE_ON_BOOT, context="maintenance")
 

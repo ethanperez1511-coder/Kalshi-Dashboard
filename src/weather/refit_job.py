@@ -23,7 +23,7 @@ from typing import Dict, List, Tuple
 
 import httpx
 
-from src.config import Settings
+from src.config import Settings, require_production_database
 from src.database import get_engine, verify_or_migrate
 from src.run_summary import write_summary
 from src.weather.calibration import Pair
@@ -160,6 +160,7 @@ def main(argv=None) -> int:
         )
 
     settings = Settings()
+    require_production_database(settings.DATABASE_URL)
     engine = get_engine(settings.DATABASE_URL)
     # Same discipline as the pipeline: report a stale schema and refuse rather
     # than failing later with a raw driver error that says nothing about the fix.

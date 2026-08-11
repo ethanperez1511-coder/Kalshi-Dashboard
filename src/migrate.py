@@ -13,7 +13,7 @@ import argparse
 import logging
 import sys
 
-from src.config import Settings
+from src.config import Settings, require_production_database
 from src.database import ensure_schema, get_engine, pending_schema_changes
 from src.run_summary import write_summary
 
@@ -32,6 +32,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     settings = Settings()
+    require_production_database(settings.DATABASE_URL)
     engine = get_engine(settings.DATABASE_URL)
 
     pending = pending_schema_changes(engine)

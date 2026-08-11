@@ -224,3 +224,23 @@ against the remote rather than the working tree:
 And the standing guard: the daily digest reports the DEPLOYED commit hash from
 GITHUB_SHA, so local-versus-production drift is visible in the same message that
 claims the system is healthy, instead of being assumed.
+
+## L14 — An unset secret is not an absent value; it is an empty one.
+
+All four workflows failed identically on `Could not parse SQLAlchemy URL from
+given URL string`. The obvious reading — a step missing its env block — was
+wrong: every step had one. The real mechanism is that an unset GitHub secret
+still sets the environment variable, to the empty string, and an empty env var
+OVERRIDES a library default rather than falling back to it. `DATABASE_URL` was
+therefore `""`, not "unset", and pydantic's default never applied.
+
+The traceback named the library, not the variable, so it read as a code bug for
+as long as nobody looked at the secret.
+
+**Rule:** for every externally-supplied configuration value, distinguish three
+states — absent, present-but-empty, and present-and-valid — and make the middle
+one fail with a message that names the variable and the likely cause. Then check
+the derived condition too: a production job that quietly fell back to the local
+SQLite default would have gone green while writing to a container filesystem
+that is deleted when the job ends, reporting success and persisting nothing.
+Falling back is not always safer than crashing.
