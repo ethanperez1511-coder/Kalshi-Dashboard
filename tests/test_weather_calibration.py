@@ -20,6 +20,8 @@ import pytest
 from src.weather.calibration import (
     CellFit,
     Pair,
+    fit_trailing,
+    score_rolling,
     brier,
     brier_skill,
     climatology_rate,
@@ -44,7 +46,7 @@ from src.weather.sanity import (
 )
 
 
-def _pairs(n, start=dt.date(2025, 1, 1), bias=0.0, noise=0.0, seed=7):
+def _pairs(n, start=dt.date(2025, 1, 1), bias=0.0, noise=0.0, seed=7):  # noqa: D401
     rng = random.Random(seed)
     out = []
     for i in range(n):
@@ -222,6 +224,92 @@ class TestPromotion:
     def test_challenger_must_beat_the_incumbent_not_merely_pass(self):
         assert not beats_incumbent(challenger_skill=0.40, incumbent_skill=0.40)
         assert beats_incumbent(challenger_skill=0.45, incumbent_skill=0.40)
+
+
+# --------------------------------------------------------------------------
+# 4b. Rolling refit — the remedy for a seasonal fit window
+# --------------------------------------------------------------------------
+
+class TestRollingFit:
+    """A single fixed window bakes in the season it was measured in.
+
+    Measured across the seven stations (fit Apr–Aug 2025, evaluate Sep–Dec):
+    the sign of (fitted σ − realized eval σ) predicted the direction of the
+    reliability miss every time. New York fitted 4.64 against a realized 2.72
+    and came out underconfident at slope 1.313; Los Angeles fitted 2.38 against
+    a realized 4.20 and came out overconfident at 0.880. Refitting on a
+    trailing window brought all 21 cells into [0.889, 1.034].
+    """
+
+    def test_trailing_fit_never_sees_its_own_outcome(self):
+        pairs = _pairs(120)
+        as_of = pairs[60].target_date
+        fit = fit_trailing(pairs, as_of, window_days=30)
+        assert fit.fit_end < as_of
+
+    def test_trailing_window_excludes_older_data(self):
+        pairs = _pairs(120)
+        as_of = pairs[100].target_date
+        narrow = fit_trailing(pairs, as_of, window_days=10)
+        wide = fit_trailing(pairs, as_of, window_days=90)
+        assert narrow.n_pairs < wide.n_pairs
+
+    def test_rolling_tracks_a_regime_change_a_fixed_fit_misses(self):
+        """Spread doubles halfway through. A fixed early fit stays too narrow;
+        a trailing fit adapts — which is the seasonal failure in miniature."""
+        calm = _pairs(120, noise=1.5, seed=3)
+        start = calm[-1].target_date + dt.timedelta(days=1)
+        volatile = _pairs(120, noise=5.0, seed=4, start=start)
+        pairs = calm + volatile
+
+        fixed = fit_cell(calm)
+        rolling = fit_trailing(pairs, volatile[-1].target_date, window_days=60)
+        assert rolling.sigma > fixed.sigma * 1.5
+
+    def test_thin_trailing_window_is_skipped_not_predicted(self):
+        """The sample floor applies to the window that produced each number,
+        not to an aggregate that hides thin days inside a healthy average."""
+        pairs = _pairs(80)
+        _, evaluation = split_pairs(pairs, pairs[40].target_date)
+        scored, windows, skipped = score_rolling(
+            pairs, evaluation, window_days=5, min_window_pairs=MIN_PAIRS_PER_CELL,
+        )
+        assert skipped == len(evaluation)
+        assert len(scored) == 0
+        assert windows == []
+
+    def test_rolling_scores_only_held_out_days(self):
+        pairs = _pairs(200, noise=3.0)
+        _, evaluation = split_pairs(pairs, pairs[100].target_date)
+        scored, windows, skipped = score_rolling(
+            pairs, evaluation, window_days=90, min_window_pairs=10,
+        )
+        assert len(scored.pit) + skipped == len(evaluation)
+        assert all(w >= 10 for w in windows)
+
+
+class TestPerCellIsolation:
+    """A failing cell must not drag the others down, nor ride along on them.
+
+    With Polymarket at zero and price-derived models gated, a single blanket
+    verdict would mean one bad station either silences the whole weather model
+    or gets carried by six good ones. Promotion is decided per cell.
+    """
+
+    def test_one_failing_cell_does_not_block_the_others(self):
+        verdicts = {
+            ("KNYC", 3): evaluate_promotion(105, 0.52, 1.313),   # the observed failure
+            ("KMIA", 1): evaluate_promotion(105, 0.72, 0.977),
+            ("KPHL", 1): evaluate_promotion(105, 0.55, 1.018),
+        }
+        assert not verdicts[("KNYC", 3)]
+        assert verdicts[("KMIA", 1)]
+        assert verdicts[("KPHL", 1)]
+
+    def test_a_promoted_neighbour_cannot_carry_a_failing_cell(self):
+        """Passing at lead 1 says nothing about lead 3 — the fit differs."""
+        assert evaluate_promotion(105, 0.61, 1.117)          # KNYC lead 1
+        assert not evaluate_promotion(105, 0.52, 1.313)      # KNYC lead 3
 
 
 # --------------------------------------------------------------------------

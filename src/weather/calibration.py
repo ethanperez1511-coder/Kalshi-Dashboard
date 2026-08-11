@@ -111,6 +111,59 @@ def fit_cell(pairs: Sequence[Pair]) -> Optional[CellFit]:
     )
 
 
+def fit_trailing(
+    pairs: Sequence[Pair], as_of: dt.date, window_days: int = 90,
+) -> Optional[CellFit]:
+    """Fit on the trailing window that ends strictly before `as_of`.
+
+    A single fixed fit window bakes in the season it was measured in. Forecast
+    error is seasonal at continental stations — measured across the seven
+    stations, reliability drift scaled with station seasonality (New York
+    +0.195, Chicago +0.171, Miami +0.015, Los Angeles −0.059), which is the
+    signature of a stale fit rather than a misspecified model.
+
+    Strictly causal: `target_date < as_of`, so a prediction never sees its own
+    outcome or any later one.
+    """
+    start = as_of - dt.timedelta(days=window_days)
+    window = [p for p in pairs if start <= p.target_date < as_of]
+    return fit_cell(window)
+
+
+def score_rolling(
+    pairs: Sequence[Pair],
+    evaluation: Sequence[Pair],
+    window_days: int = 90,
+    min_window_pairs: int = 0,
+) -> Tuple[Scored, List[int], int]:
+    """Score with the fit refreshed before every evaluation day.
+
+    Returns (scored, window_sizes, skipped). A day whose trailing window holds
+    fewer than `min_window_pairs` is SKIPPED rather than predicted — the sample
+    floor applies to the window that actually produced each number, not to some
+    aggregate that hides thin days inside a healthy average.
+    """
+    scored = Scored()
+    window_sizes: List[int] = []
+    skipped = 0
+
+    for pair in sorted(evaluation, key=lambda p: p.target_date):
+        fit = fit_trailing(pairs, pair.target_date, window_days)
+        if fit is None or fit.n_pairs < min_window_pairs:
+            skipped += 1
+            continue
+        window_sizes.append(fit.n_pairs)
+        sigma = max(fit.sigma, _MIN_SIGMA)
+        for strike in strike_ladder(pair.forecast_f):
+            scored.predictions.append(fit.prob_above(pair.forecast_f, strike))
+            scored.outcomes.append(1 if pair.observed_f > strike else 0)
+        scored.pit.append(
+            _NORMAL.cdf((pair.observed_f - fit.predict_mean(pair.forecast_f)) / sigma)
+        )
+
+    return scored, window_sizes, skipped
+
+
 def split_pairs(
     pairs: Sequence[Pair], split_date: dt.date,
 ) -> Tuple[List[Pair], List[Pair]]:
