@@ -15,6 +15,7 @@ from src.models.position import Position
 from src.models.trade import Trade
 from src.models.odds import OddsCacheEntry, OddsQuotaUsage
 from src.models.match_map import MarketMatchMap
+from src.models.weather import ForecastArchive, WeatherCellFit
 from src.backtest.models import BacktestRun, BacktestTrade
 
 __all__ = [
@@ -28,6 +29,8 @@ __all__ = [
     "OddsCacheEntry",
     "OddsQuotaUsage",
     "MarketMatchMap",
+    "ForecastArchive",
+    "WeatherCellFit",
     "BacktestRun",
     "BacktestTrade",
 ]

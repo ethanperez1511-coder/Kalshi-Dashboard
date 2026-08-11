@@ -29,9 +29,21 @@ jobs:
       - name: Install
         run: pip install ".[dev]"
       - name: Run live suite
+        id: live
         env:
           # Read-only market data. None of these enable live trading — `mode`
           # lives in the DB and defaults to paper.
           KALSHI_API_KEY: ${{ secrets.KALSHI_API_KEY }}
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY_B64 }}
         run: python -m pytest -m live -v
+
+      # A scheduled guard that fails quietly in Actions is the same bug as a
+      # test that skips itself: something is watching, nothing is watched. The
+      # failure has to reach a phone.
+      - name: Alert on failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python -m src.alert_live_failure
