@@ -20,6 +20,7 @@ from src.ingestion.series_ingest import coverage_from_db
 from src.weather.archive import run_daily_archive
 from src.weather.digest import format_weather_digest, weather_digest
 from src.recorder.health import format_recorder_health, recorder_health
+from src.digest_health import record_section
 from src.weather.fitting import guard_events
 from src.weather.stations import STATIONS
 from src.modeling.match_seed import apply_seed_decisions
@@ -137,10 +138,20 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
         # it, so every added section degrades to a note rather than an exception.
         def _section(label, build):
             try:
-                return build()
+                value = build()
+                healthy = True
             except Exception:
                 logger.warning("%s digest section failed", label, exc_info=True)
-                return f"{label}: unavailable (see logs)"
+                value, healthy = f"{label}: unavailable (see logs)", False
+            try:
+                escalate, days = record_section(engine, label, healthy)
+                if escalate and not healthy:
+                    alerter.digest_degraded(label, days)
+                elif escalate and healthy:
+                    alerter.digest_recovered(label)
+            except Exception:
+                logger.warning("digest health tracking failed", exc_info=True)
+            return value
 
         alerter.heartbeat(
             ts.bankroll, ts.paper_trade_count, ts.paper_trades_before_live,

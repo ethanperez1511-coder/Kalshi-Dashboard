@@ -9,6 +9,7 @@ from src.models.trade import Trade
 from src.models.position import Position
 from src.models.settings import TradingSettings
 from src.risk.manager import TradeDecision
+from src.execution.preflight import assert_maker_allowed
 from src.trading.fees import kalshi_fee
 from src.trading_config import (
     ORDER_TYPE,
@@ -162,6 +163,12 @@ class TradeEngine:
         if SKIP_HELD_MARKETS and self._has_open_position(market_id):
             logger.info(f"Skipping {market_id}: position already open")
             return None
+
+        # A config flag is not a decision. If maker execution is switched on
+        # while the legacy integer money path is live, fractional fills would be
+        # truncated rather than rejected — so refuse here, loudly, at the moment
+        # it would have traded.
+        assert_maker_allowed(self._engine)
 
         mode_info = self._get_mode()
         is_paper = mode_info["mode"] == "paper" or not self.can_trade_live()

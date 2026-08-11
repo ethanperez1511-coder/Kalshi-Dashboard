@@ -131,6 +131,21 @@ class Alerter:
                    if transitions >= 4 else "")
             )
 
+    def digest_degraded(self, section: str, days: int) -> None:
+        """A digest section that has been unavailable for days on end.
+
+        The heartbeat still arrives and still says alive, so without this the
+        broken section is a standing failure wearing a green checkmark.
+        """
+        self.send(
+            f"⚠️ <b>DIGEST SECTION DEGRADED</b> — {section}\n"
+            f"Reported unavailable {days} days running. The heartbeat is still "
+            f"green, so this will not surface any other way."
+        )
+
+    def digest_recovered(self, section: str) -> None:
+        self.send(f"✅ Digest section recovered — {section}")
+
     def error(self, msg: str) -> None:
         self.send(f"🚨 PIPELINE ERROR\n<code>{msg[:300]}</code>")
 

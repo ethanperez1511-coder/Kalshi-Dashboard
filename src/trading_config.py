@@ -210,3 +210,10 @@ SHADOW_MAKER_ENABLED: bool = _env_bool("TRADING_SHADOW_MAKER_ENABLED", False)
 # Actually resting maker orders. Stays OFF until the simulator is validated
 # against enough recorded book history — see tasks/PHASE_3_DESIGN.md §5.
 MAKER_ENABLED: bool = _env_bool("TRADING_MAKER_ENABLED", False)
+
+# Attestation, not a discoverable fact: Open-Meteo's free tier is CC-BY-4.0
+# NON-COMMERCIAL. Unset reads as BLOCKED on the maker-enable checklist, so the
+# licence question cannot resolve itself by being ignored.
+FORECAST_LICENSING_RESOLVED: bool = _env_bool(
+    "TRADING_FORECAST_LICENSING_RESOLVED", False
+)
