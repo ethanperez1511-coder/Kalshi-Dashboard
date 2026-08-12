@@ -41,6 +41,13 @@ def deployment_state(engine: Engine) -> Dict[str, Any]:
     except Exception:
         health = {"messages": 0, "per_category": {}}
 
+    try:
+        from src.maintenance.retention import format_size_line, plan_retention
+
+        size_line = format_size_line(plan_retention(engine))
+    except Exception:
+        size_line = "💾 DB: size unavailable"
+
     from src.models.settings import TradingSettings
     from src.database import get_session
 
@@ -62,6 +69,7 @@ def deployment_state(engine: Engine) -> Dict[str, Any]:
         "gate_count": gate_count(engine),
         "gate_target": target,
         "legacy_excluded": legacy_count(engine),
+        "db_size_line": size_line,
     }
 
 
@@ -96,4 +104,6 @@ def format_deployment_state(state: Dict[str, Any]) -> str:
         f"   gate: {state['gate_count']}/{state['gate_target']} "
         f"({state['legacy_excluded']} legacy excluded)"
     )
+    if state.get("db_size_line"):
+        lines.append(f"   {state['db_size_line']}")
     return "\n".join(lines)

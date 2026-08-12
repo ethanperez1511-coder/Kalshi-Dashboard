@@ -1,0 +1,46 @@
+name: retention
+
+# Keeps the database under the Neon free tier. Daily, because the write rate
+# makes this a standing obligation rather than a cleanup task: ingest alone
+# would fill 0.5 GB in under three days without the source-side suppression.
+#
+# Orderbook deltas are NOT pruned inside the simulator validation window. Kalshi
+# serves no historical book, so a deleted delta cannot be re-collected — if the
+# database fills while they are protected, the correct outcome is a loud failure,
+# not the destruction of the one dataset with no second source.
+on:
+  schedule:
+    - cron: "25 4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "true = report only"
+        required: false
+        default: "false"
+
+concurrency:
+  group: retention
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install .
+      - name: Apply retention
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.maintenance.prune ${{ inputs.dry_run == 'true' && '--dry-run' || '' }}
+      - name: Alert on failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python -m src.alert_live_failure

@@ -217,3 +217,14 @@ MAKER_ENABLED: bool = _env_bool("TRADING_MAKER_ENABLED", False)
 FORECAST_LICENSING_RESOLVED: bool = _env_bool(
     "TRADING_FORECAST_LICENSING_RESOLVED", False
 )
+
+# --- Storage: snapshot write rate -------------------------------------
+# Ingest sees ~5,084 markets per 5-minute cycle. Writing all of them is 1.46M
+# rows/day, which at ~436 bytes/row fills Neon's 0.5 GB free tier in 2.8 days.
+# Retention cannot rescue a write rate that high — these stop the writes at the
+# source, and both drop only rows nothing downstream reads.
+SNAPSHOT_SKIP_UNTRADED: bool = _env_bool("TRADING_SNAPSHOT_SKIP_UNTRADED", True)
+SNAPSHOT_SKIP_UNCHANGED: bool = _env_bool("TRADING_SNAPSHOT_SKIP_UNCHANGED", True)
+# An unchanged market is still recorded this often, so the downstream staleness
+# guard (which keys on snapshot AGE) cannot mistake "quiet" for "gone".
+SNAPSHOT_HEARTBEAT_MINUTES: int = _env_int("TRADING_SNAPSHOT_HEARTBEAT_MINUTES", 20)
