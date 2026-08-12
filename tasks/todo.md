@@ -668,3 +668,14 @@ resolving before the live switch.
 **Deliberately not built:** sport-demand filtering (derived TTL already spends exactly the cap),
 live/pre-game TTL split (same budget), ESPN summary/core endpoints (only needed for Phase 4 CLV
 backfill).
+
+## Queue — not urgent, tracked
+
+- [ ] **Weather classifier net is too wide.** `KXPERFORMROLE007-MONEYPENNY-JUN` (a
+      James Bond casting market) reached the WEATHER terms parser and was marked
+      unpriceable. Harmless today — it refused safely rather than pricing
+      something it could not read — but `is_temperature_market()` keys on
+      `"temp"` appearing anywhere in the title, and "contemporary", "attempt",
+      "temporary" and similar all match. Narrow it to the temperature series /
+      structured strike shape rather than a substring, and add the Bond ticker
+      as a regression fixture.

@@ -81,6 +81,7 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     settings = Settings()
     require_production_database(settings.DATABASE_URL)
     engine = get_engine(settings.DATABASE_URL)
+    clock = _Stopwatch()
     # Refuses to trade against a schema it does not recognise rather than
     # migrating on the way past. The Actions workflow runs `python -m
     # src.migrate` as its own explicit step before this.
