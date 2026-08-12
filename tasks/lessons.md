@@ -288,3 +288,31 @@ push filters into SQL so the loop walks fewer rows. Assert the statement COUNT
 in a test — `before_cursor_execute` makes it cheap — because a count that scales
 with input size is the bug, and it fails identically on any engine. And check
 what work is discarded downstream: the cheapest optimisation is not doing it.
+
+## L17 — A retry that can restart from the top is an infinite loop wearing a retry's clothes.
+
+Polymarket's Gamma API answers 422 once pagination runs past a few thousand
+rows. `raise_for_status()` turned that into an exception, the exception escaped
+`get_markets` before the cache was set, and the caller caught it and moved to the
+next market — which called `get_markets` again, restarting the walk from offset
+0. Every market re-walked, hit the same wall, and the cycle died on the platform
+timeout with no bounded loop anywhere in the traceback.
+
+Two rules fall out:
+
+**Never retry a deterministic 4xx.** 4xx means the request is wrong. An
+identical request will fail identically, so a retry is guaranteed waste and an
+unbounded retry is a hang. 429 and 5xx are the retryable ones; everything else
+in the 4xx range should stop.
+
+**Cache the failure, not just the success.** Leaving the cache unset on error is
+what converted one failed call into N failed walks. A partial or empty result
+that is remembered costs one failure; a result that is not remembered costs one
+failure per caller.
+
+And the structural fix, which is worth more than either: **the platform timeout
+must be the last resort, not the mechanism.** Give each stage its own budget so
+it stops taking new work and returns what it has. Ingest is idempotent and the
+next cycle is minutes away, so a partial ingest is worth far more than a
+cancelled tick — twice now, one bad stage has destroyed scoring, settlement and
+the digest along with it.

@@ -65,10 +65,14 @@ class SeriesCoverage:
 
 async def ingest_series(
     engine: Engine, client, series_tickers: List[str], max_markets: int = 500,
+    deadline=None,
 ) -> SeriesCoverage:
     coverage = SeriesCoverage()
 
     for ticker in series_tickers:
+        if deadline is not None and deadline.expired():
+            logger.warning("Series ingest stopped early at %s (budget)", ticker)
+            break
         try:
             markets = await client.get_series_markets(ticker, max_markets=max_markets)
         except Exception:

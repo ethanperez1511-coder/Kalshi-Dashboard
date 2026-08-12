@@ -7,6 +7,7 @@ import logging
 from sqlalchemy import Engine
 
 from src.config import Settings
+from src.deadline import Deadline
 from src.ingestion.market_sync import sync_markets
 from src.ingestion.price_recorder import record_price_snapshots
 from src.ingestion.series_ingest import ingest_series
@@ -22,11 +23,14 @@ from src.trading_config import (
 logger = logging.getLogger(__name__)
 
 
-async def _fetch_and_sync(engine: Engine, settings: Settings) -> int:
+async def _fetch_and_sync(
+    engine: Engine, settings: Settings, deadline: Deadline = None,
+) -> int:
+    deadline = deadline or Deadline.none("ingest")
     client = KalshiClient.from_settings(settings)
     try:
         markets = await client.get_all_markets(max_markets=MARKET_FETCH_CAP)
-        if INGEST_EVENT_CATEGORIES:
+        if INGEST_EVENT_CATEGORIES and not deadline.expired():
             # Non-sports markets never surface in the capped /markets walk —
             # pull them via the events feed (true category, nested markets).
             event_markets = await client.get_event_markets(max_markets=EVENT_FETCH_CAP)
@@ -42,9 +46,9 @@ async def _fetch_and_sync(engine: Engine, settings: Settings) -> int:
         # It shares none of the caps above, so nothing here can shrink the
         # coverage the rest of the pipeline already depends on.
         series = ingest_series_list()
-        if series:
+        if series and not deadline.expired():
             coverage = await ingest_series(
-                engine, client, series, max_markets=SERIES_FETCH_CAP,
+                engine, client, series, max_markets=SERIES_FETCH_CAP, deadline=deadline,
             )
             return len(markets) + coverage.fetched
 
@@ -53,7 +57,9 @@ async def _fetch_and_sync(engine: Engine, settings: Settings) -> int:
         await client._http.aclose()
 
 
-def ingest_live_markets(engine: Engine, settings: Settings) -> int:
+def ingest_live_markets(
+    engine: Engine, settings: Settings, deadline: Deadline = None,
+) -> int:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -64,9 +70,9 @@ def ingest_live_markets(engine: Engine, settings: Settings) -> int:
         # run in a new thread to avoid "cannot call asyncio.run()" error.
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as pool:
-            count = pool.submit(asyncio.run, _fetch_and_sync(engine, settings)).result()
+            count = pool.submit(asyncio.run, _fetch_and_sync(engine, settings, deadline)).result()
     else:
-        count = asyncio.run(_fetch_and_sync(engine, settings))
+        count = asyncio.run(_fetch_and_sync(engine, settings, deadline))
 
     logger.info(f"Ingested {count} live markets")
     return count

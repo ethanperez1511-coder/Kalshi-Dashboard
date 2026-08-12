@@ -17,6 +17,13 @@ from src.kalshi.schemas import (
 logger = logging.getLogger(__name__)
 
 
+# Hard ceiling on any paginated walk. Every loop below also has a natural exit
+# (empty cursor, or max_markets reached), but a cursor that stops advancing
+# while still returning non-empty would spin forever — the same shape that took
+# an entire cycle down via Polymarket's 422.
+MAX_PAGES = 200
+
+
 class KalshiClient:
     def __init__(
         self,
@@ -80,7 +87,7 @@ class KalshiClient:
     async def get_all_markets(self, limit: int = 100, max_markets: int = 1000) -> List[KalshiMarket]:
         all_markets: List[KalshiMarket] = []
         cursor = ""
-        while True:
+        for _ in range(MAX_PAGES):
             params: dict = {"limit": limit, "status": "open"}
             if cursor:
                 params["cursor"] = cursor
@@ -91,6 +98,8 @@ class KalshiClient:
             cursor = data.cursor
             if not cursor or len(all_markets) >= max_markets:
                 break
+            if not data.markets:
+                break      # a cursor that advances but yields nothing
             logger.info(f"Fetched {len(all_markets)} markets so far...")
         all_markets = all_markets[:max_markets]
         logger.info(f"Fetched {len(all_markets)} total markets (cap={max_markets})")
@@ -116,7 +125,9 @@ class KalshiClient:
         """
         markets: List[KalshiMarket] = []
         cursor = ""
-        while len(markets) < max_markets:
+        for _ in range(MAX_PAGES):
+            if len(markets) >= max_markets:
+                break
             params: dict = {
                 "series_ticker": series_ticker, "status": status, "limit": limit,
             }
@@ -147,7 +158,9 @@ class KalshiClient:
         """
         markets: List[KalshiMarket] = []
         cursor = ""
-        while len(markets) < max_markets:
+        for _ in range(MAX_PAGES):
+            if len(markets) >= max_markets:
+                break
             params: dict = {
                 "limit": limit,
                 "status": "open",

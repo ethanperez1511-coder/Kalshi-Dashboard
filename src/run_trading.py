@@ -12,11 +12,13 @@ import time
 from src.alerts import Alerter
 from src.config import Settings, require_production_database
 from src.database import get_engine, verify_or_migrate
+from src.deadline import Deadline
 from src.demo.seed import seed_demo_data
 from src.ingestion.live_ingest import ingest_live_markets
 from src.ev.calculator import EVResult
 from src.ev.scorer import score_all_markets
 from src.kalshi.client import KalshiClient
+from src.trading_config import INGEST_BUDGET_SECONDS, SCORE_BUDGET_SECONDS
 from src.ingestion.series_ingest import coverage_from_db
 from src.weather.archive import run_daily_archive
 from src.weather.digest import format_weather_digest, weather_digest
@@ -82,6 +84,7 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     require_production_database(settings.DATABASE_URL)
     engine = get_engine(settings.DATABASE_URL)
     clock = _Stopwatch()
+    overruns: list = []
     # Refuses to trade against a schema it does not recognise rather than
     # migrating on the way past. The Actions workflow runs `python -m
     # src.migrate` as its own explicit step before this.
@@ -93,7 +96,10 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
         seed_demo_data(engine)
     else:
         logger.info("Online mode — fetching live markets from Kalshi")
-        ingest_live_markets(engine, settings)
+        ingest_deadline = Deadline(INGEST_BUDGET_SECONDS, "ingest")
+        ingest_live_markets(engine, settings, deadline=ingest_deadline)
+        if ingest_deadline.exceeded:
+            overruns.append("ingest")
     clock.mark("ingest")
 
     # Human match verdicts live in the repo so they reach Neon, which is only
@@ -160,7 +166,10 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
 
     # Step 1: Score all markets
     logger.info("=== Scoring markets ===")
-    results = score_all_markets(engine)
+    score_deadline = Deadline(SCORE_BUDGET_SECONDS, "scoring")
+    results = score_all_markets(engine, deadline=score_deadline)
+    if score_deadline.exceeded:
+        overruns.append("scoring")
     clock.mark("score")
 
     # Alert once if the sports odds feed has gone dark (quota/key) — otherwise
@@ -179,7 +188,8 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
         f"Cycle: {len(results)} scored, {len(qualifying)} qualifying | "
         f"gate {state['gate_count']}/{state['gate_target']} | "
         f"weather {state['weather_cells_priceable']}/{state['weather_cells_total']} | "
-        f"{clock.summary()}",
+        f"{clock.summary()}"
+        + (f" | ⚠️ OVER BUDGET: {', '.join(overruns)}" if overruns else ""),
         format_deployment_state(state).replace("<b>", "").replace("</b>", "")
         + "\n" + clock.summary(),
     )

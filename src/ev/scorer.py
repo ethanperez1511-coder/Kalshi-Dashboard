@@ -30,7 +30,9 @@ from src.models.price import PriceSnapshot
 logger = logging.getLogger(__name__)
 
 
-def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, Any]]:
+def score_all_markets(
+    engine: Engine, fee_rate: float = 0.01, deadline=None,
+) -> List[Dict[str, Any]]:
     """Score all open markets and upsert Opportunity rows.
 
     Steps for each open market:
@@ -108,7 +110,15 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
     results: List[Dict[str, Any]] = []
     pending_opportunities: List[dict] = []
 
-    for mkt in markets:
+    for index, mkt in enumerate(markets):
+        # Checked every 50 markets: often enough to stop promptly, rare
+        # enough that the clock read is not itself the cost.
+        if deadline is not None and index % 50 == 0 and deadline.expired():
+            logger.warning(
+                "Scoring stopped at %d/%d markets (budget) — the rest of "
+                "the cycle continues", index, len(markets),
+            )
+            break
         market_id: str = mkt["market_id"]
         title: str = mkt["title"]
         category: str = mkt["category"]

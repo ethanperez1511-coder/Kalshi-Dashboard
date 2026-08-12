@@ -228,3 +228,16 @@ SNAPSHOT_SKIP_UNCHANGED: bool = _env_bool("TRADING_SNAPSHOT_SKIP_UNCHANGED", Tru
 # An unchanged market is still recorded this often, so the downstream staleness
 # guard (which keys on snapshot AGE) cannot mistake "quiet" for "gone".
 SNAPSHOT_HEARTBEAT_MINUTES: int = _env_int("TRADING_SNAPSHOT_HEARTBEAT_MINUTES", 20)
+
+# --- Per-stage time budgets --------------------------------------------
+# The GitHub job cap is 8 minutes and should be the LAST resort, not the
+# mechanism: a cycle has already been killed twice by it, once on per-market
+# queries and once on an infinite retry loop in an external API. Each time,
+# scoring, settlement and the digest were destroyed by one bad stage.
+#
+# A stage that runs out stops taking new work and returns what it has. Ingest is
+# idempotent and the next cycle is five minutes away, so a partial ingest is
+# worth far more than a cancelled tick. The budgets sum to well under the cap so
+# there is room for the stages that follow.
+INGEST_BUDGET_SECONDS: int = _env_int("TRADING_INGEST_BUDGET_SECONDS", 180)
+SCORE_BUDGET_SECONDS: int = _env_int("TRADING_SCORE_BUDGET_SECONDS", 180)

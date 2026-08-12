@@ -37,6 +37,11 @@ class PolymarketClient:
         self._max_markets = max_markets
         self._cache: List[PolyMarket] | None = None
 
+    # Gamma rejects pagination past a few thousand rows with a 422. That is the
+    # end of the result set, not a failure — and a hard page cap makes the walk
+    # terminate even if the API's behaviour changes again.
+    MAX_PAGES = 40
+
     def get_markets(self) -> List[PolyMarket]:
         if self._cache is not None:
             return self._cache
@@ -44,20 +49,54 @@ class PolymarketClient:
         markets: List[PolyMarket] = []
         offset = 0
         page = 100
-        while len(markets) < self._max_markets:
-            resp = httpx.get(
-                f"{_BASE_URL}/markets",
-                params={
-                    "closed": "false",
-                    "active": "true",
-                    "limit": page,
-                    "offset": offset,
-                    "order": "volumeNum",
-                    "ascending": "false",
-                },
-                timeout=15.0,
-            )
-            resp.raise_for_status()
+
+        for _ in range(self.MAX_PAGES):
+            if len(markets) >= self._max_markets:
+                break
+            try:
+                resp = httpx.get(
+                    f"{_BASE_URL}/markets",
+                    params={
+                        "closed": "false",
+                        "active": "true",
+                        "limit": page,
+                        "offset": offset,
+                        "order": "volumeNum",
+                        "ascending": "false",
+                    },
+                    timeout=15.0,
+                )
+            except httpx.HTTPError as exc:
+                logger.warning(
+                    "Polymarket: transport error at offset %d (%s) — keeping the "
+                    "%d markets already fetched", offset, exc, len(markets),
+                )
+                break
+
+            if resp.status_code == 422:
+                # END OF RESULTS, not a retryable failure. Gamma answers 422
+                # once the offset runs past what it will serve. Retrying is
+                # pointless — the request is deterministic and will fail
+                # identically — and re-walking from offset 0 is what turned this
+                # into an infinite loop that consumed an entire 8-minute cycle.
+                logger.info(
+                    "Polymarket: pagination ends at offset %d (422) — %d markets",
+                    offset, len(markets),
+                )
+                break
+            if 400 <= resp.status_code < 500:
+                logger.warning(
+                    "Polymarket: %d at offset %d — request is wrong, not retrying; "
+                    "keeping %d markets", resp.status_code, offset, len(markets),
+                )
+                break
+            if resp.status_code >= 500:
+                logger.warning(
+                    "Polymarket: %d at offset %d — keeping %d markets",
+                    resp.status_code, offset, len(markets),
+                )
+                break
+
             rows = resp.json()
             if not rows:
                 break
@@ -67,6 +106,10 @@ class PolymarketClient:
                     markets.append(pm)
             offset += page
 
+        # Cache even a partial or empty result. Leaving the cache unset is what
+        # made every subsequent caller restart the whole walk; the markets are
+        # ordered by volume descending, so a truncated list is the liquid head
+        # of the book, which is the only part matching cares about.
         self._cache = markets[: self._max_markets]
         logger.info(f"Polymarket: loaded {len(self._cache)} binary markets")
         return self._cache
