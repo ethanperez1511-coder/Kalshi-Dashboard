@@ -355,3 +355,48 @@ markets for a station we do not model (Texas, average daily *minimum* across two
 airports). Correct refusals wearing an alarm's label. **Separate "I cannot read
 this" from "I read it and it is out of scope"** — pooling them turns an alarm
 that should be investigated into noise that gets ignored.
+
+## L20 — Route a model by what it can price, not by a string the exchange controls.
+
+`WeatherModel.matches()` accepted category "Climate and Weather". Measured live
+on 2026-08-13, all 84 daily temperature contracts come back from the Kalshi
+series endpoint with category **"General"**. The model was therefore dispatched
+to 26 unrelated markets it has no station for, and to **none** of the 28 it can
+price. It had never priced a contract in production.
+
+What makes this the worst kind of bug: every health signal stayed green. The
+refit job ran, 21 of 21 cells promoted, the digest printed `weather 21/21`
+every cycle. That number measures the *fits*, not whether anything consumed
+them — a check that could not fail. Scope now lives with the model
+(`claims(market_id, category)`, defaulting to the category test) and the
+station map is the weather model's scope, because it is the same lookup
+`estimate` performs first and therefore cannot claim what it would refuse.
+
+**Whenever a health metric counts artefacts, add one that counts uses.**
+Promoted cells is an artefact count. Contracts dispatched and contracts priced
+are use counts, and only the second pair would have caught this.
+
+## L21 — A count without its funnel cannot be interrogated.
+
+"1 scored" and "9 scored" were the same headline for three unrelated causes: an
+infinite retry loop, per-market query volume, and a model that was never
+dispatched. Every open market is now attributed to exactly one gate, and the
+partition is asserted — `open == stale + no-price + prescreen + no-model +
+gated + budget + scored`. When it does not close, the report says UNATTRIBUTED
+rather than quietly under-counting, because the predictable next failure is a
+`continue` that nobody incremented.
+
+Attribution alone is not enough: **record the state of every external source
+next to the count that depends on it.** "SportsOddsModel produced nothing" is a
+market fact when the feed holds 85 games and a source outage when it holds
+zero, and those were the same line in the digest.
+
+## L22 — Two constants with a hidden ordering are a bug waiting for a config change.
+
+Unchanged quotes are rewritten every `SNAPSHOT_HEARTBEAT_MINUTES` (20); the
+scorer discards snapshots older than `MAX_SNAPSHOT_AGE_MINUTES` (30). Correct
+today, entirely by the 10-minute gap. Both are independently settable by env
+var, and raising the heartbeat — the obvious move for keeping the database
+inside a free-tier quota — would make every market with a steady price
+permanently unscorable, with a smaller scored count as the only symptom. The
+ordering is now an assertion, not a coincidence.

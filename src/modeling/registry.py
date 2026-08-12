@@ -34,11 +34,14 @@ class ModelRegistry:
         """Return all specialized models followed by the fallback."""
         return self._specialized + [self._fallback]
 
-    def get_models_for(self, category: str) -> List[BaseModel]:
-        """Return specialized models matching *category* plus the fallback.
+    def get_models_for(
+        self, category: str, market_id: str = "",
+    ) -> List[BaseModel]:
+        """Return specialized models claiming this market plus the fallback.
 
-        If no specialized model matches the category, only the fallback is
-        returned.
+        Dispatch asks each model whether it claims the market, not merely
+        whether it claims the category. `claims()` defaults to the category
+        test, so this is identical for every model whose scope is a category.
         """
-        matching = [m for m in self._specialized if m.matches(category)]
+        matching = [m for m in self._specialized if m.claims(market_id, category)]
         return matching + [self._fallback]

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -251,6 +252,11 @@ class SportsOddsModel(BaseModel):
     def __init__(self, odds_client: Optional[OddsClient] = None):
         self._odds_client = odds_client
         self._games: Optional[List[GameOdds]] = None
+        # Silence from this model has five causes and they are not the same
+        # problem: no client (key unset), an empty feed (quota dead or the API
+        # returned nothing), every game already commenced, an unparseable
+        # title, or a leg with no matching game. The digest saw one number.
+        self.refusals: Counter = Counter()
 
     @property
     def category(self) -> str:
@@ -277,14 +283,21 @@ class SportsOddsModel(BaseModel):
         engine: Engine,
     ) -> Optional[ModelResult]:
         games = self._get_games()
+        if not games:
+            self.refusals[
+                "no_odds_client" if self._odds_client is None else "empty_odds_feed"
+            ] += 1
+            return None
         # Only games that haven't started: pre-game odds for a live or
         # finished game are stale and must never be matched.
         games = [g for g in games if not _game_commenced(g)]
         if not games:
+            self.refusals["all_games_commenced"] += 1
             return None
 
         legs = parse_legs(title)
         if not legs:
+            self.refusals["title_has_no_parseable_legs"] += 1
             return None
 
         leg_probs: List[Tuple[ParlayLeg, float]] = []
@@ -294,6 +307,7 @@ class SportsOddsModel(BaseModel):
             if prob is None:
                 # Any leg without real external data kills the estimate.
                 # Substituting a neutral prior here manufactures fake edges.
+                self.refusals["leg_not_in_odds_feed"] += 1
                 return None
             leg_probs.append((leg, prob))
 
@@ -320,6 +334,7 @@ class SportsOddsModel(BaseModel):
                 f"Skipping same-game parlay {market_id}: legs share a game event. "
                 "Leg independence assumption violated."
             )
+            self.refusals["same_game_parlay"] += 1
             return None
 
         # --- HOOK: future correlation model ---

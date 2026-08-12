@@ -27,6 +27,8 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import re
+
+from collections import Counter
 from typing import List, Optional
 
 from sqlalchemy import Engine, select
@@ -88,6 +90,11 @@ class WeatherModel(BaseModel):
         self._guard_cache = {}
         self._forecast_cache = {}
         self._ladder_cache = {}
+        # Why the model declined, counted. Four independent gates can each
+        # produce silence, and "0 of 28 priced" does not say which one fired —
+        # a stale fit and a tripwire trip are the same number in the digest and
+        # completely different situations.
+        self.refusals: Counter = Counter()
 
     @property
     def category(self) -> str:
@@ -95,6 +102,18 @@ class WeatherModel(BaseModel):
 
     def matches(self, category: str) -> bool:
         return category in ("Climate and Weather", "Weather")
+
+    def claims(self, market_id: str, category: str) -> bool:
+        """Scope is the station map, not the category string.
+
+        Measured against the live API on 2026-08-13: all 84 daily temperature
+        contracts are returned with category "General". Routing on category
+        meant this model was dispatched to 26 unrelated "Climate and Weather"
+        markets it has no station for, and to none of the 28 it can price. The
+        station map is the honest scope and it is the same lookup `estimate`
+        already performs first, so this cannot claim a market it would refuse.
+        """
+        return station_for_market(market_id) is not None or self.matches(category)
 
     @property
     def model_type(self) -> str:
@@ -162,22 +181,29 @@ class WeatherModel(BaseModel):
     ) -> Optional[ModelResult]:
         station = station_for_market(market_id)
         if station is None or engine is None:
+            self.refusals["no_station_mapping" if engine is not None else "no_engine"] += 1
             return None
 
         target = target_date_from_ticker(market_id)
         if target is None:
             logger.info("Weather: %s has no readable target date", market_id)
+            self.refusals["no_target_date"] += 1
             return None
 
         terms = self._terms(engine, market_id)
         if terms is None or terms["terms_status"] != TERMS_PARSED:
+            self.refusals["terms_not_parsed"] += 1
             return None
         if terms["direction"] is None or terms["strike"] is None:
+            self.refusals["terms_incomplete"] += 1
             return None
 
         today = self._now().date()
         lead = (target - today).days
         if lead < 1 or lead > MAX_PRICEABLE_LEAD:
+            self.refusals[
+                "lead_past" if lead < 1 else f"lead_beyond_{MAX_PRICEABLE_LEAD}d"
+            ] += 1
             return None
 
         cache_key = (station.mos_station, lead)
@@ -187,6 +213,7 @@ class WeatherModel(BaseModel):
         ok, reason = cell_priceable(fit_record, self._now())
         if not ok:
             logger.info("Weather: %s unpriceable — %s", market_id, reason)
+            self.refusals[f"cell_{reason}"] += 1
             return None
 
         if station.series_ticker not in self._guard_cache:
@@ -196,6 +223,7 @@ class WeatherModel(BaseModel):
         paused, guard_reason = self._guard_cache[station.series_ticker]
         if paused:
             logger.warning("Weather: %s paused — %s", market_id, guard_reason)
+            self.refusals["guard_paused"] += 1
             return None
 
         # One MOS fetch per (station, target, lead) per cycle, not per contract.
@@ -213,6 +241,7 @@ class WeatherModel(BaseModel):
                 self._forecast_cache[forecast_key] = None
         forecast = self._forecast_cache[forecast_key]
         if forecast is None:
+            self.refusals["mos_unavailable"] += 1
             return None
 
         fit = fit_record.as_cell_fit()
@@ -226,6 +255,7 @@ class WeatherModel(BaseModel):
             logger.error(
                 "Weather SUSPECT %s: %s", market_id, verdict.reason,
             )
+            self.refusals["sanity_tripwire"] += 1
             return None
 
         strike = float(terms["strike"])
@@ -240,6 +270,7 @@ class WeatherModel(BaseModel):
         skill = fit_record.brier_skill or 0.0
         confidence = max(0.5, min(0.85, 0.55 + 0.5 * skill))
 
+        self.refusals["priced"] += 1
         return ModelResult(
             market_id=market_id,
             p_model=max(0.0, min(1.0, p_model)),

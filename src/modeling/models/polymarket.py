@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 from datetime import timezone
 from typing import List, Optional, Set
 
@@ -128,6 +129,10 @@ class PolymarketModel(BaseModel):
         # run, so instance scope is cycle scope.
         self._index: Optional[List[tuple]] = None
         self._decisions: Optional[dict] = None
+        # A match that was blocked by a human, a pair awaiting review, and a
+        # title nothing resembles are three different states that all present
+        # as no estimate.
+        self.refusals: Counter = Counter()
 
     @property
     def category(self) -> str:
@@ -152,6 +157,7 @@ class PolymarketModel(BaseModel):
         except Exception:
             # Feed down: no estimate. Never substitute a number.
             logger.warning("Polymarket feed unavailable — no estimate", exc_info=True)
+            self.refusals["feed_unavailable"] += 1
             return None
 
         # 1. A recorded decision outranks any amount of string similarity.
@@ -162,17 +168,22 @@ class PolymarketModel(BaseModel):
         if decision is not None:
             status, condition_id = decision
             if status == "blocked":
+                self.refusals["human_blocked"] += 1
                 return None
             if status == "pending":
+                self.refusals["awaiting_review"] += 1
                 return None  # awaiting human review — stay silent
             if status == "approved":
-                return self._from_approved(market_id, condition_id, candidates)
+                result = self._from_approved(market_id, condition_id, candidates)
+                self.refusals["approved_mapping_unusable" if result is None else "priced"] += 1
+                return result
 
         if self._index is None:
             liquid = [c for c in candidates if c.volume_usd >= POLYMARKET_MIN_VOLUME_USD]
             self._index = build_candidate_index(liquid)
         match = _match_market(title, [], index=self._index)
         if match is None:
+            self.refusals["no_similar_question"] += 1
             return None  # nothing plausible; nothing to review either
 
         sim = _similarity(_normalize_tokens(title), _normalize_tokens(match.question))
@@ -196,6 +207,7 @@ class PolymarketModel(BaseModel):
                     f"Polymarket match queued for review ({verdict.verdict}) for "
                     f"{market_id}: {'; '.join(verdict.reasons)}"
                 )
+                self.refusals["entity_mismatch"] += 1
                 return None
             horizon = self._horizon_conflict(market_id, match, engine)
             if horizon is not None:
@@ -210,6 +222,7 @@ class PolymarketModel(BaseModel):
                     reason=horizon,
                 )
                 logger.info(f"Polymarket horizon mismatch for {market_id}: {horizon}")
+                self.refusals["horizon_mismatch"] += 1
                 return None
 
             record_auto_approved(
@@ -221,6 +234,7 @@ class PolymarketModel(BaseModel):
                 poly_question=match.question,
             )
 
+        self.refusals["priced"] += 1
         return self._result(market_id, match, sim, source="entity match")
 
     def _horizon_conflict(self, market_id: str, match, engine) -> Optional[str]:

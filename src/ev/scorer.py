@@ -10,7 +10,8 @@ from src.config import Settings
 from src.database import get_session
 from src.ev.calculator import calculate_ev
 from src.ev.filter import TradeFilter
-from src.modeling.base import MODEL_TYPE_PRICE_DERIVED
+from src.ev.funnel import ScoreFunnel
+from src.modeling.base import MODEL_TYPE_INDEPENDENT, MODEL_TYPE_PRICE_DERIVED
 from src.modeling.odds_api import OddsClient
 from src.modeling.registry import ModelRegistry
 from src.trading_config import (
@@ -32,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 def score_all_markets(
     engine: Engine, fee_rate: float = 0.01, deadline=None,
+    funnel: Optional[ScoreFunnel] = None,
 ) -> List[Dict[str, Any]]:
     """Score all open markets and upsert Opportunity rows.
 
@@ -41,7 +43,13 @@ def score_all_markets(
     3. Calculate EV and run TradeFilter.
     4. Upsert an Opportunity row.
     5. Return a list of result dicts.
+
+    Pass a `ScoreFunnel` to have every market attributed to the gate that
+    dropped it. The counters are a strict partition of the open universe, so
+    a starved scorable set can be told apart from a misfiring gate without
+    adding a log line after the fact.
     """
+    funnel = funnel if funnel is not None else ScoreFunnel()
     settings = Settings()
     # Passing the engine is what makes the odds cache and quota ledger survive
     # the process — this pipeline is a fresh interpreter on every cron tick.
@@ -77,6 +85,13 @@ def score_all_markets(
     # which also collapses the row count the loop has to walk.
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=MAX_SNAPSHOT_AGE_MINUTES)
     with get_session(engine) as session:
+        # Counted separately because the join below silently drops markets with
+        # no fresh snapshot, and "the feed stopped" and "nothing is scorable"
+        # produce the same scored count without it.
+        funnel.open_markets = session.execute(
+            select(func.count()).select_from(Market)
+            .where(Market.status.in_(["open", "active"]))
+        ).scalar_one()
         newest = (
             select(
                 PriceSnapshot.market_id.label("market_id"),
@@ -111,6 +126,7 @@ def score_all_markets(
             }
             for r in rows
         ]
+    funnel.with_fresh_snapshot = len(markets)
     logger.info("Scoring %d markets with fresh snapshots", len(markets))
 
     results: List[Dict[str, Any]] = []
@@ -124,6 +140,7 @@ def score_all_markets(
                 "Scoring stopped at %d/%d markets (budget) — the rest of "
                 "the cycle continues", index, len(markets),
             )
+            funnel.budget_skipped = len(markets) - index
             break
         market_id: str = mkt["market_id"]
         title: str = mkt["title"]
@@ -134,12 +151,17 @@ def score_all_markets(
         snap_row = mkt["snapshot"]
 
         if snap_row is None:
+            # Unreachable through the inner join above, but counted rather than
+            # dropped: an uncounted `continue` is exactly what makes a funnel
+            # stop balancing when the query is next changed.
+            funnel.with_fresh_snapshot -= 1
             continue
 
         yes_bid, yes_ask, last_price, volume, snap_ts = snap_row
 
         # Skip markets with no trade history
         if last_price == 0:
+            funnel.no_last_price += 1
             continue
 
         # Stale data guard. The SQL cutoff above already excludes these; this
@@ -150,6 +172,10 @@ def score_all_markets(
                 snap_ts = snap_ts.replace(tzinfo=timezone.utc)
             age_minutes = (datetime.now(timezone.utc) - snap_ts).total_seconds() / 60.0
             if age_minutes > MAX_SNAPSHOT_AGE_MINUTES:
+                # The SQL cutoff already excluded these, so reaching here means
+                # the row aged out between the query and now. Counted with the
+                # snapshot bucket so the partition still closes.
+                funnel.with_fresh_snapshot -= 1
                 continue
 
         # --- Step 2b: market-only gates, computed before any model runs ---
@@ -169,6 +195,7 @@ def score_all_markets(
             bid_ask_spread_cents=spread_cents,
             hours_to_expiry=hours_to_expiry,
         ):
+            funnel.prescreen_rejected += 1
             continue
 
         # --- Step 3: run models (first non-None wins) ---
@@ -177,13 +204,16 @@ def score_all_markets(
         # result discarded by the gate immediately below. Behaviour-identical,
         # since a price-derived winner produced no Opportunity row either way.
         models = [
-            m for m in registry.get_models_for(category)
+            m for m in registry.get_models_for(category, market_id)
             if TRADE_PRICE_DERIVED_MODELS or m.model_type != MODEL_TYPE_PRICE_DERIVED
         ]
+        if not any(m.model_type == MODEL_TYPE_INDEPENDENT for m in models):
+            funnel.no_independent_model += 1
         model_result = None
         winning_model_name: str = "Unknown"
         winning_model_type: str = MODEL_TYPE_PRICE_DERIVED
         for model in models:
+            funnel.model_attempts[type(model).__name__] += 1
             result = model.estimate(
                 market_id=market_id,
                 title=title,
@@ -191,16 +221,19 @@ def score_all_markets(
                 engine=engine,
             )
             if result is not None:
+                funnel.model_estimates[type(model).__name__] += 1
                 model_result = result
                 winning_model_name = type(model).__name__
                 winning_model_type = model.model_type
                 break
 
         if model_result is None:
+            funnel.no_model_estimate += 1
             continue
 
         # Gate price-derived models unless explicitly enabled
         if winning_model_type == MODEL_TYPE_PRICE_DERIVED and not TRADE_PRICE_DERIVED_MODELS:
+            funnel.price_derived_gated += 1
             continue
 
         # --- Step 4: calculate EV ---
@@ -249,7 +282,43 @@ def score_all_markets(
             "yes_bid": yes_bid,
             "yes_ask": yes_ask,
         }
+        funnel.scored += 1
         results.append(result_dict)
+
+    # Whether the metered feed was reachable and what it cost. Zero sports
+    # markets scoring during the season is a red flag for the source, not the
+    # market, and only the ledger can tell those apart.
+    if odds_client is not None:
+        from src.modeling.odds_store import month_key
+        try:
+            month = month_key(datetime.now(timezone.utc))
+            ledger = getattr(odds_client, "_ledger", None)
+            funnel.odds_state = {
+                "key_set": True,
+                "quota_dead": bool(odds_client.quota_dead),
+                "used": ledger.used(month, "the_odds_api") if ledger else None,
+                "remaining": ledger.remaining(month, "the_odds_api") if ledger else None,
+                "games_loaded": sum(
+                    len(getattr(m, "_games", None) or [])
+                    for m in registry.all_models
+                ),
+            }
+        except Exception:
+            logger.warning("Could not read odds quota state", exc_info=True)
+    else:
+        funnel.odds_state = {"key_set": False}
+
+    # Models that track their own refusal reasons report them here. Without
+    # this, "WeatherModel: 28 dispatched, 0 estimated" says something is wrong
+    # but not which of its four independent gates fired.
+    for model in registry.all_models:
+        funnel.record_refusals(type(model).__name__, getattr(model, "refusals", None))
+    if not funnel.balances():
+        logger.error(
+            "Score funnel does not balance: %d open, %d attributed — an "
+            "uncounted rejection path exists",
+            funnel.open_markets, funnel.attributed(),
+        )
 
     # One write for every scored market, rather than a SELECT + INSERT/UPDATE
     # + COMMIT each. That was three network round-trips per market against Neon.

@@ -43,6 +43,23 @@ class BaseModel(ABC):
         """
         return category == self.category
 
+    def claims(self, market_id: str, category: str) -> bool:
+        """Whether this model should be dispatched to a specific market.
+
+        Defaults to the category test, which is right for every model whose
+        scope IS a category. It is wrong for a model whose scope is something
+        narrower and knowable — WeatherModel prices exactly the stations it has
+        a fit for, and dispatching it by category made the whole model
+        unreachable when Kalshi returned those contracts as "General".
+
+        A model must be able to state its own scope. Routing on a string the
+        exchange controls means a relabelling upstream silently retires a
+        model, and nothing in the system reports the retirement: the cell fits
+        still promote, the digest still prints 21/21, and no contract is ever
+        priced.
+        """
+        return self.matches(category)
+
     @abstractmethod
     def estimate(
         self,

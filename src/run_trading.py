@@ -16,6 +16,7 @@ from src.deadline import Deadline
 from src.demo.seed import seed_demo_data
 from src.ingestion.live_ingest import ingest_live_markets
 from src.ev.calculator import EVResult
+from src.ev.funnel import ScoreFunnel
 from src.ev.scorer import score_all_markets
 from src.kalshi.client import KalshiClient
 from src.trading_config import INGEST_BUDGET_SECONDS, SCORE_BUDGET_SECONDS
@@ -167,7 +168,8 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     # Step 1: Score all markets
     logger.info("=== Scoring markets ===")
     score_deadline = Deadline(SCORE_BUDGET_SECONDS, "scoring")
-    results = score_all_markets(engine, deadline=score_deadline)
+    funnel = ScoreFunnel()
+    results = score_all_markets(engine, deadline=score_deadline, funnel=funnel)
     if score_deadline.exceeded:
         overruns.append("scoring")
     clock.mark("score")
@@ -185,13 +187,18 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     state = deployment_state(engine)
     logger.info(clock.summary())
     write_summary(
-        f"Cycle: {len(results)} scored, {len(qualifying)} qualifying | "
+        f"Cycle: {len(results)} scored, {len(qualifying)} qualifying, "
+        f"{len(watching)} watching | "
         f"gate {state['gate_count']}/{state['gate_target']} | "
         f"weather {state['weather_cells_priceable']}/{state['weather_cells_total']} | "
         f"{clock.summary()}"
         + (f" | ⚠️ OVER BUDGET: {', '.join(overruns)}" if overruns else ""),
         format_deployment_state(state).replace("<b>", "").replace("</b>", "")
-        + "\n" + clock.summary(),
+        + "\n" + clock.summary()
+        # The funnel, permanently. A scored count without it cannot be
+        # interrogated: the same number means "nine markets are scorable" and
+        # "one gate ate the universe", and we have now hit the second twice.
+        + "\n\n" + funnel.format(),
     )
 
     # Daily liveness heartbeat — fires even on idle (zero-trade) cycles, before the
@@ -222,6 +229,10 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
             coverage=_section("coverage", lambda: coverage_from_db(engine)) or None,
             per_model=_section("per-model", lambda: trades_by_model(engine)) or None,
             weather="\n".join([
+                # The funnel in the daily digest as well as the per-cycle run
+                # summary: the Actions page is where a starved scorable set is
+                # diagnosed, but Telegram is where it gets noticed.
+                _section("🔻 Funnel", lambda: "🔻 " + funnel.headline()),
                 _section("📦 Deploy", lambda: format_deployment_state(deployment_state(engine))),
                 _section("🌡 Weather", lambda: format_weather_digest(weather_digest(engine))),
                 _section("🎙 Recorder", lambda: format_recorder_health(recorder_health(engine))),
