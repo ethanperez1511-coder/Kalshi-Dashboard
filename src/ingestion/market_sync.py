@@ -1,7 +1,7 @@
 from __future__ import annotations
 import logging
 from typing import List
-from sqlalchemy import Engine
+from sqlalchemy import Engine, select
 from src.database import get_session
 from src.kalshi.schemas import KalshiMarket
 from src.models.market import (
@@ -65,34 +65,62 @@ def sync_markets(
     kalshi_markets: List[KalshiMarket],
     series_ticker: str = "",
 ) -> int:
-    new_count = 0
+    """Upsert markets in bulk.
+
+    This was a SELECT-then-INSERT/UPDATE per ticker. Against SQLite each is a
+    function call; against Neon each is a network round-trip, and ~5,000 markets
+    meant ~10,000 sequential round-trips per cycle. Now: one SELECT for the ids
+    that already exist, then two bulk statements.
+
+    Still a single transaction, so a mid-cycle kill rolls the whole sync back
+    rather than leaving half a market table.
+    """
+    if not kalshi_markets:
+        return 0
+
+    # Collapse duplicates within the batch, last occurrence winning. The
+    # previous SELECT-then-upsert loop tolerated a repeated ticker implicitly;
+    # a bulk insert would violate the unique constraint instead.
+    deduped = {km.ticker: km for km in kalshi_markets}
+    kalshi_markets = list(deduped.values())
+
+    tickers = [km.ticker for km in kalshi_markets]
     with get_session(engine) as session:
+        existing_ids = {
+            ticker: row_id
+            for row_id, ticker in session.execute(
+                select(Market.id, Market.market_id).where(Market.market_id.in_(tickers))
+            ).all()
+        }
+
+        inserts: List[dict] = []
+        updates: List[dict] = []
         for km in kalshi_markets:
-            fields = _terms_fields(km)
-            existing = session.query(Market).filter_by(market_id=km.ticker).first()
-            if existing:
-                existing.title = km.title
-                existing.category = km.category
-                existing.status = km.status
-                existing.close_date = km.close_time
-                existing.rules = km.rules_primary
-                for key, value in fields.items():
-                    setattr(existing, key, value)
-                if series_ticker:
-                    existing.series_ticker = series_ticker
+            row = {
+                "market_id": km.ticker,
+                "title": km.title,
+                "category": km.category,
+                "close_date": km.close_time,
+                "status": km.status,
+                "rules": km.rules_primary,
+                **_terms_fields(km),
+            }
+            if series_ticker:
+                row["series_ticker"] = series_ticker
+            row_id = existing_ids.get(km.ticker)
+            if row_id is None:
+                inserts.append(row)
             else:
-                market = Market(
-                    market_id=km.ticker,
-                    title=km.title,
-                    category=km.category,
-                    close_date=km.close_time,
-                    status=km.status,
-                    rules=km.rules_primary,
-                    series_ticker=series_ticker or None,
-                    **fields,
-                )
-                session.add(market)
-                new_count += 1
+                updates.append({**row, "id": row_id})
+
+        if inserts:
+            session.bulk_insert_mappings(Market, inserts)
+        if updates:
+            session.bulk_update_mappings(Market, updates)
         session.commit()
-    logger.info(f"Synced {len(kalshi_markets)} markets ({new_count} new)")
-    return new_count
+
+    logger.info(
+        "Synced %d markets (%d new, %d updated)",
+        len(kalshi_markets), len(inserts), len(updates),
+    )
+    return len(inserts)

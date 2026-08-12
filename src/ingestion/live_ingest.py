@@ -8,7 +8,7 @@ from sqlalchemy import Engine
 
 from src.config import Settings
 from src.ingestion.market_sync import sync_markets
-from src.ingestion.price_recorder import record_price_snapshot
+from src.ingestion.price_recorder import record_price_snapshots
 from src.ingestion.series_ingest import ingest_series
 from src.kalshi.client import KalshiClient
 from src.trading_config import (
@@ -33,15 +33,10 @@ async def _fetch_and_sync(engine: Engine, settings: Settings) -> int:
             seen = {m.ticker for m in markets}
             markets.extend(m for m in event_markets if m.ticker not in seen)
         sync_markets(engine, markets)
-        for m in markets:
-            record_price_snapshot(
-                engine,
-                market_id=m.ticker,
-                yes_bid=m.yes_bid,
-                yes_ask=m.yes_ask,
-                last_price=m.last_price,
-                volume=m.volume,
-            )
+        record_price_snapshots(
+            engine,
+            [(m.ticker, m.yes_bid, m.yes_ask, m.last_price, m.volume) for m in markets],
+        )
 
         # Series-targeted pass, on its own call path after the general ingest.
         # It shares none of the caps above, so nothing here can shrink the

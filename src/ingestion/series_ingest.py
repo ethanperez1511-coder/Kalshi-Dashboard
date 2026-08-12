@@ -18,7 +18,7 @@ from typing import Dict, List
 from sqlalchemy import Engine
 
 from src.ingestion.market_sync import sync_markets
-from src.ingestion.price_recorder import record_price_snapshot
+from src.ingestion.price_recorder import record_price_snapshots
 from src.models.market import TERMS_PARSED, TERMS_UNPARSED, TERMS_UNSUPPORTED
 from src.weather.terms import (
     is_temperature_market,
@@ -90,15 +90,10 @@ async def ingest_series(
         unparsed = len(weather) - parsed - unsupported
 
         sync_markets(engine, markets, series_ticker=ticker)
-        for m in markets:
-            record_price_snapshot(
-                engine,
-                market_id=m.ticker,
-                yes_bid=m.yes_bid,
-                yes_ask=m.yes_ask,
-                last_price=m.last_price,
-                volume=m.volume,
-            )
+        record_price_snapshots(
+            engine,
+            [(m.ticker, m.yes_bid, m.yes_ask, m.last_price, m.volume) for m in markets],
+        )
 
         coverage.fetched += len(markets)
         coverage.parsed += parsed

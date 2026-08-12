@@ -268,3 +268,23 @@ choosing a bound — the title limit was not a close call, it was 2.8x over.
 Corollary, from the same session: a test that computes an age from the wall
 clock while the code under test uses an injected clock will pass until the date
 rolls over. Pin fixtures to the injected clock.
+
+## L16 — Row-at-a-time is free locally and fatal over a network.
+
+The first production cycle hit the 8-minute job cap. The code was correct and
+every test was green; the difference was that SQLite makes a query a function
+call and Neon makes it a network round-trip. The scorer opened a session PER
+MARKET to fetch that market's latest snapshot — ~135,000 sequential round-trips
+before scoring began. Ingest added ~15,000 more.
+
+Two things were only visible from production: the round-trip cost, and the fact
+that price-derived models were being executed — each querying the database per
+market — with their output then discarded by a gate. Work whose result is thrown
+away is invisible until it is the thing consuming the budget.
+
+**Rule:** any loop that touches the database once per item is a latent timeout.
+Load in one query keyed by the loop variable, write with bulk statements, and
+push filters into SQL so the loop walks fewer rows. Assert the statement COUNT
+in a test — `before_cursor_execute` makes it cheap — because a count that scales
+with input size is the bug, and it fails identically on any engine. And check
+what work is discarded downstream: the cheapest optimisation is not doing it.

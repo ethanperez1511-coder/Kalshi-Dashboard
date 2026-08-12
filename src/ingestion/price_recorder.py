@@ -26,7 +26,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, func, select
 
 from src.database import get_session
 from src.models.price import PriceSnapshot
@@ -84,3 +84,74 @@ def record_price_snapshot(
         ))
         session.commit()
     return True
+
+
+def record_price_snapshots(engine: Engine, quotes: list, now: Optional[datetime] = None) -> int:
+    """Batch form of record_price_snapshot. One read, one write.
+
+    The per-market version opened a session, ran a SELECT for the previous
+    snapshot, and committed — three round-trips each. At ~5,000 markets a cycle
+    that is ~15,000 sequential round-trips to Neon, which is what exhausted the
+    8-minute job budget.
+
+    `quotes` is an iterable of (market_id, yes_bid, yes_ask, last_price, volume).
+    Suppression rules are identical to the single-row path.
+    """
+    now = now or datetime.now(timezone.utc)
+    quotes = list(quotes)
+    if not quotes:
+        return 0
+
+    candidates = [
+        q for q in quotes
+        if not (SNAPSHOT_SKIP_UNTRADED and q[3] == 0 and q[4] == 0)
+    ]
+    if not candidates:
+        return 0
+
+    market_ids = [q[0] for q in candidates]
+    previous = {}
+    with get_session(engine) as session:
+        if SNAPSHOT_SKIP_UNCHANGED:
+            newest = (
+                select(
+                    PriceSnapshot.market_id.label("market_id"),
+                    func.max(PriceSnapshot.id).label("snap_id"),
+                )
+                .where(PriceSnapshot.market_id.in_(market_ids))
+                .group_by(PriceSnapshot.market_id)
+                .subquery()
+            )
+            for row in session.execute(
+                select(
+                    PriceSnapshot.market_id, PriceSnapshot.yes_bid,
+                    PriceSnapshot.yes_ask, PriceSnapshot.last_price,
+                    PriceSnapshot.volume, PriceSnapshot.timestamp,
+                ).join(newest, PriceSnapshot.id == newest.c.snap_id)
+            ).all():
+                previous[row[0]] = row[1:]
+
+        rows = []
+        for market_id, yes_bid, yes_ask, last_price, volume in candidates:
+            prior = previous.get(market_id)
+            if prior is not None:
+                prev_bid, prev_ask, prev_last, prev_volume, prev_ts = prior
+                unchanged = (
+                    prev_bid == yes_bid and prev_ask == yes_ask
+                    and prev_last == last_price and prev_volume == volume
+                )
+                if unchanged:
+                    if prev_ts is not None and prev_ts.tzinfo is None:
+                        prev_ts = prev_ts.replace(tzinfo=timezone.utc)
+                    age = (now - prev_ts).total_seconds() / 60.0 if prev_ts else 1e9
+                    if age < SNAPSHOT_HEARTBEAT_MINUTES:
+                        continue
+            rows.append({
+                "market_id": market_id, "yes_bid": yes_bid, "yes_ask": yes_ask,
+                "last_price": last_price, "volume": volume, "timestamp": now,
+            })
+
+        if rows:
+            session.bulk_insert_mappings(PriceSnapshot, rows)
+        session.commit()
+    return len(rows)

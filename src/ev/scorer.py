@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, func, select
 
 from src.config import Settings
 from src.database import get_session
@@ -25,6 +26,8 @@ from src.trading_config import (
 from src.models.market import Market
 from src.models.opportunity import Opportunity
 from src.models.price import PriceSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, Any]]:
@@ -61,27 +64,49 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
         max_hours_to_expiry=MAX_DAYS_TO_EXPIRY * 24,
     )
 
-    # --- Step 1: load open markets as plain dicts ---
+    # --- Step 1: load open markets WITH their latest snapshot, in one query ---
+    # This used to be one query for the markets and then one more PER MARKET for
+    # its snapshot. Against SQLite that is a function call; against Neon every
+    # one is a network round-trip, and at ~135k open markets it consumed the
+    # entire 8-minute job budget before scoring began.
+    #
+    # The stale-snapshot guard means a market without a recent snapshot is
+    # skipped anyway, so the cutoff is applied in SQL rather than in Python —
+    # which also collapses the row count the loop has to walk.
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=MAX_SNAPSHOT_AGE_MINUTES)
     with get_session(engine) as session:
+        newest = (
+            select(
+                PriceSnapshot.market_id.label("market_id"),
+                func.max(PriceSnapshot.id).label("snap_id"),
+            )
+            .group_by(PriceSnapshot.market_id)
+            .subquery()
+        )
         rows = session.execute(
             select(
-                Market.market_id,
-                Market.title,
-                Market.category,
-                Market.close_date,
-            ).where(Market.status.in_(["open", "active"]))
+                Market.market_id, Market.title, Market.category, Market.close_date,
+                PriceSnapshot.yes_bid, PriceSnapshot.yes_ask,
+                PriceSnapshot.last_price, PriceSnapshot.volume,
+                PriceSnapshot.timestamp,
+            )
+            .join(newest, newest.c.market_id == Market.market_id)
+            .join(PriceSnapshot, PriceSnapshot.id == newest.c.snap_id)
+            .where(Market.status.in_(["open", "active"]))
+            .where(PriceSnapshot.timestamp >= cutoff)
         ).all()
         markets = [
             {
-                "market_id": r[0],
-                "title": r[1],
-                "category": r[2],
+                "market_id": r[0], "title": r[1], "category": r[2],
                 "close_date": r[3],
+                "snapshot": (r[4], r[5], r[6], r[7], r[8]),
             }
             for r in rows
         ]
+    logger.info("Scoring %d markets with fresh snapshots", len(markets))
 
     results: List[Dict[str, Any]] = []
+    pending_opportunities: List[dict] = []
 
     for mkt in markets:
         market_id: str = mkt["market_id"]
@@ -89,20 +114,8 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
         category: str = mkt["category"]
         close_date: datetime = mkt["close_date"]
 
-        # --- Step 2: get latest PriceSnapshot as plain values ---
-        with get_session(engine) as session:
-            snap_row = session.execute(
-                select(
-                    PriceSnapshot.yes_bid,
-                    PriceSnapshot.yes_ask,
-                    PriceSnapshot.last_price,
-                    PriceSnapshot.volume,
-                    PriceSnapshot.timestamp,
-                )
-                .where(PriceSnapshot.market_id == market_id)
-                .order_by(PriceSnapshot.timestamp.desc())
-                .limit(1)
-            ).first()
+        # --- Step 2: snapshot already loaded with the market ---
+        snap_row = mkt["snapshot"]
 
         if snap_row is None:
             continue
@@ -113,8 +126,9 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
         if last_price == 0:
             continue
 
-        # Stale data guard: a market with no fresh snapshot has closed early or
-        # dropped out of the ingest feed — its price is fiction, never trade it.
+        # Stale data guard. The SQL cutoff above already excludes these; this
+        # stays as a second line of defence so the invariant holds even if the
+        # query is ever changed.
         if snap_ts is not None:
             if snap_ts.tzinfo is None:
                 snap_ts = snap_ts.replace(tzinfo=timezone.utc)
@@ -142,7 +156,14 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
             continue
 
         # --- Step 3: run models (first non-None wins) ---
-        models = registry.get_models_for(category)
+        # Skip price-derived models outright when they are gated off. They were
+        # still being RUN — each querying the database per market — and their
+        # result discarded by the gate immediately below. Behaviour-identical,
+        # since a price-derived winner produced no Opportunity row either way.
+        models = [
+            m for m in registry.get_models_for(category)
+            if TRADE_PRICE_DERIVED_MODELS or m.model_type != MODEL_TYPE_PRICE_DERIVED
+        ]
         model_result = None
         winning_model_name: str = "Unknown"
         winning_model_type: str = MODEL_TYPE_PRICE_DERIVED
@@ -186,8 +207,8 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
             min_edge_override=min_edge_override,
         )
 
-        # --- Step 7: upsert Opportunity ---
-        _upsert_opportunity(
+        # --- Step 7: queue the Opportunity row (written in one batch below) ---
+        pending_opportunities.append(_opportunity_row(
             engine=engine,
             market_id=market_id,
             ev_result=ev_result,
@@ -195,7 +216,7 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
             model_name=winning_model_name,
             filter_result_status=filter_result.status,
             reasoning=model_result.reasoning,
-        )
+        ))
 
         result_dict = {
             "market_id": market_id,
@@ -214,50 +235,51 @@ def score_all_markets(engine: Engine, fee_rate: float = 0.01) -> List[Dict[str, 
         }
         results.append(result_dict)
 
+    # One write for every scored market, rather than a SELECT + INSERT/UPDATE
+    # + COMMIT each. That was three network round-trips per market against Neon.
+    _flush_opportunities(engine, pending_opportunities)
     return results
 
 
-def _upsert_opportunity(
-    engine: Engine,
-    market_id: str,
-    ev_result: Any,
-    model_result: Any,
-    model_name: str,
-    filter_result_status: str,
-    reasoning: str,
-) -> None:
-    """Insert or update an Opportunity row for the given market."""
+def _opportunity_row(
+    engine=None, market_id="", ev_result=None, model_result=None,
+    model_name="", filter_result_status="", reasoning="",
+) -> dict:
+    """Plain values for one Opportunity row. Writes nothing."""
+    return {
+        "market_id": market_id,
+        "p_model": ev_result.p_model,
+        "implied_prob": ev_result.implied_prob,
+        "edge": ev_result.best_edge,
+        "net_ev": ev_result.best_ev,
+        "recommended_side": ev_result.recommended_side,
+        "confidence": model_result.confidence,
+        "status": filter_result_status,
+        "reasoning": reasoning,
+        "model_name": model_name,
+    }
 
+
+def _flush_opportunities(engine: Engine, rows: List[dict]) -> None:
+    """Upsert every scored opportunity in one read and two writes."""
+    if not rows:
+        return
+    market_ids = [r["market_id"] for r in rows]
     with get_session(engine) as session:
-        existing: Optional[Opportunity] = (
-            session.query(Opportunity).filter_by(market_id=market_id).first()
-        )
-        now = datetime.now(timezone.utc)
-
-        if existing is not None:
-            existing.p_model = model_result.p_model
-            existing.implied_prob = ev_result.implied_prob
-            existing.edge = ev_result.edge
-            existing.net_ev = ev_result.net_ev
-            existing.recommended_side = ev_result.recommended_side
-            existing.confidence = model_result.confidence
-            existing.status = filter_result_status
-            existing.reasoning = reasoning
-            existing.model_name = model_name
-            existing.scored_at = now
-        else:
-            opp = Opportunity(
-                market_id=market_id,
-                p_model=model_result.p_model,
-                implied_prob=ev_result.implied_prob,
-                edge=ev_result.edge,
-                net_ev=ev_result.net_ev,
-                recommended_side=ev_result.recommended_side,
-                confidence=model_result.confidence,
-                status=filter_result_status,
-                reasoning=reasoning,
-                model_name=model_name,
-                scored_at=now,
-            )
-            session.add(opp)
+        existing = {
+            market_id: row_id
+            for row_id, market_id in session.execute(
+                select(Opportunity.id, Opportunity.market_id)
+                .where(Opportunity.market_id.in_(market_ids))
+            ).all()
+        }
+        inserts = [r for r in rows if r["market_id"] not in existing]
+        updates = [
+            {**r, "id": existing[r["market_id"]]}
+            for r in rows if r["market_id"] in existing
+        ]
+        if inserts:
+            session.bulk_insert_mappings(Opportunity, inserts)
+        if updates:
+            session.bulk_update_mappings(Opportunity, updates)
         session.commit()

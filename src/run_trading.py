@@ -5,6 +5,7 @@ Supports continuous mode: python -m src.run_trading --loop --interval 300
 from __future__ import annotations
 import argparse
 import logging
+import time
 import signal
 import time
 
@@ -50,6 +51,31 @@ def _handle_signal(signum, frame):
     _shutdown = True
 
 
+class _Stopwatch:
+    """Per-stage timing, so a slowdown is visible before it becomes a timeout.
+
+    The first production cycle died on the 8-minute job cap with no indication
+    of which stage consumed it.
+    """
+
+    def __init__(self):
+        self.stages = {}
+        self._t0 = time.monotonic()
+
+    def mark(self, name: str) -> None:
+        now = time.monotonic()
+        self.stages[name] = now - self._t0
+        self._t0 = now
+
+    @property
+    def total(self) -> float:
+        return sum(self.stages.values())
+
+    def summary(self) -> str:
+        parts = " ".join(f"{k} {v:.0f}s" for k, v in self.stages.items())
+        return f"timing: {parts} | total {self.total:.0f}s"
+
+
 def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     alerter = alerter or Alerter()
     settings = Settings()
@@ -67,6 +93,7 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     else:
         logger.info("Online mode — fetching live markets from Kalshi")
         ingest_live_markets(engine, settings)
+    clock.mark("ingest")
 
     # Human match verdicts live in the repo so they reach Neon, which is only
     # writable from this runner. Idempotent; never overrides a dashboard decision.
@@ -101,6 +128,7 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
 
     settler = Settler(engine, kalshi_client=kalshi_client)
     settled = settler.settle_all()
+    clock.mark("settle")
     if settled:
         logger.info(f"=== Settled {len(settled)} positions ===")
         for s in settled:
@@ -132,6 +160,7 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     # Step 1: Score all markets
     logger.info("=== Scoring markets ===")
     results = score_all_markets(engine)
+    clock.mark("score")
 
     # Alert once if the sports odds feed has gone dark (quota/key) — otherwise
     # SportsOddsModel silently produces nothing and only Polymarket carries.
@@ -144,11 +173,14 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     rejected = [r for r in results if r["status"] == "rejected"]
     logger.info(f"Scored {len(results)} markets: {len(qualifying)} qualifying, {len(watching)} watching, {len(rejected)} rejected")
     state = deployment_state(engine)
+    logger.info(clock.summary())
     write_summary(
         f"Cycle: {len(results)} scored, {len(qualifying)} qualifying | "
         f"gate {state['gate_count']}/{state['gate_target']} | "
-        f"weather {state['weather_cells_priceable']}/{state['weather_cells_total']}",
-        format_deployment_state(state).replace("<b>", "").replace("</b>", ""),
+        f"weather {state['weather_cells_priceable']}/{state['weather_cells_total']} | "
+        f"{clock.summary()}",
+        format_deployment_state(state).replace("<b>", "").replace("</b>", "")
+        + "\n" + clock.summary(),
     )
 
     # Daily liveness heartbeat — fires even on idle (zero-trade) cycles, before the

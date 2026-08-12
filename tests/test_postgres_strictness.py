@@ -194,3 +194,125 @@ class TestBankrollGuard:
         Base.metadata.create_all(db_engine)
         TradingSettings.get_or_create(db_engine)
         assert_bankroll_workable(db_engine)
+
+
+# --------------------------------------------------------------------------
+# Round-trip counts: the 8-minute timeout class
+# --------------------------------------------------------------------------
+
+class TestBatchedWrites:
+    """Row-at-a-time ORM work is a function call on SQLite and a network
+    round-trip on Neon. The first production cycle spent its whole 8-minute
+    budget on ~135k of them before scoring began."""
+
+    def _markets(self, n, prefix="M"):
+        import datetime as dtm
+        from src.kalshi.schemas import KalshiMarket
+
+        return [
+            KalshiMarket(
+                ticker=f"{prefix}-{i}", title=f"t{i}", category="Sports",
+                close_time=dtm.datetime(2026, 12, 31, tzinfo=dtm.timezone.utc),
+                status="open", yes_bid=44, yes_ask=46, last_price=45, volume=100,
+            )
+            for i in range(n)
+        ]
+
+    def test_sync_is_a_bounded_number_of_statements(self, db_engine):
+        """Not proportional to market count."""
+        from sqlalchemy import event
+        from src.ingestion.market_sync import sync_markets
+
+        Base.metadata.create_all(db_engine)
+        counter = {"n": 0}
+
+        @event.listens_for(db_engine, "before_cursor_execute")
+        def _count(conn, cursor, statement, params, context, executemany):
+            counter["n"] += 1
+
+        sync_markets(db_engine, self._markets(500))
+        # One SELECT + one bulk INSERT + transaction control. Nowhere near 500.
+        assert counter["n"] < 25, f"{counter['n']} statements for 500 markets"
+
+    def test_duplicate_tickers_in_one_batch_do_not_break_the_insert(self, db_engine):
+        from src.ingestion.market_sync import sync_markets
+
+        Base.metadata.create_all(db_engine)
+        markets = self._markets(1) * 3
+        sync_markets(db_engine, markets)
+        with get_session(db_engine) as s:
+            assert s.query(Market).count() == 1
+
+    def test_sync_updates_existing_rows(self, db_engine):
+        from src.ingestion.market_sync import sync_markets
+
+        Base.metadata.create_all(db_engine)
+        sync_markets(db_engine, self._markets(3))
+        changed = self._markets(3)
+        changed[0].title = "updated title"
+        sync_markets(db_engine, changed)
+
+        with get_session(db_engine) as s:
+            assert s.query(Market).count() == 3
+            assert s.query(Market).filter_by(market_id="M-0").one().title == "updated title"
+
+    def test_snapshot_batch_is_a_bounded_number_of_statements(self, db_engine):
+        from sqlalchemy import event
+        from src.ingestion.price_recorder import record_price_snapshots
+
+        Base.metadata.create_all(db_engine)
+        counter = {"n": 0}
+
+        @event.listens_for(db_engine, "before_cursor_execute")
+        def _count(conn, cursor, statement, params, context, executemany):
+            counter["n"] += 1
+
+        quotes = [(f"M-{i}", 44, 46, 45, 100) for i in range(500)]
+        written = record_price_snapshots(db_engine, quotes)
+        assert written == 500
+        assert counter["n"] < 25, f"{counter['n']} statements for 500 snapshots"
+
+    def test_batch_writer_applies_the_same_suppression_rules(self, db_engine):
+        import datetime as dtm
+        from src.ingestion.price_recorder import record_price_snapshots
+
+        Base.metadata.create_all(db_engine)
+        now = dtm.datetime(2026, 8, 12, 12, tzinfo=dtm.timezone.utc)
+
+        assert record_price_snapshots(db_engine, [("DEAD", 0, 0, 0, 0)], now=now) == 0
+        assert record_price_snapshots(db_engine, [("M", 44, 46, 45, 100)], now=now) == 1
+        # Identical quote five minutes later is suppressed.
+        assert record_price_snapshots(
+            db_engine, [("M", 44, 46, 45, 100)], now=now + dtm.timedelta(minutes=5),
+        ) == 0
+        # A changed quote always writes.
+        assert record_price_snapshots(
+            db_engine, [("M", 45, 47, 46, 120)], now=now + dtm.timedelta(minutes=6),
+        ) == 1
+
+    def test_scorer_does_not_query_per_market(self, db_engine):
+        """The specific regression: one session per market for its snapshot."""
+        import datetime as dtm
+        from sqlalchemy import event
+        from src.ev.scorer import score_all_markets
+        from src.ingestion.market_sync import sync_markets
+        from src.ingestion.price_recorder import record_price_snapshots
+
+        Base.metadata.create_all(db_engine)
+        sync_markets(db_engine, self._markets(300))
+        record_price_snapshots(
+            db_engine, [(f"M-{i}", 44, 46, 45, 100) for i in range(300)],
+        )
+
+        counter = {"n": 0}
+
+        @event.listens_for(db_engine, "before_cursor_execute")
+        def _count(conn, cursor, statement, params, context, executemany):
+            counter["n"] += 1
+
+        score_all_markets(db_engine)
+        # Was ~3 per market (snapshot fetch + opportunity SELECT/INSERT/COMMIT),
+        # plus per-market queries inside price-derived models whose output the
+        # gate discarded anyway. Snapshot load and opportunity upsert are now
+        # batched, and gated-off models no longer run at all.
+        assert counter["n"] < 60, f"{counter['n']} statements for 300 markets"
