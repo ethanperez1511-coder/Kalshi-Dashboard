@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import DateTime, Integer, String
+from sqlalchemy import DateTime, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.database import Base
@@ -13,7 +13,7 @@ class Position(Base):
     __tablename__ = "positions"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    market_id: Mapped[str] = mapped_column(String(100), index=True)
+    market_id: Mapped[str] = mapped_column(Text, index=True)
     side: Mapped[str] = mapped_column(String(10))  # "yes" or "no"
     entry_price: Mapped[int] = mapped_column(Integer)  # cents
     quantity: Mapped[int] = mapped_column(Integer)

@@ -13,7 +13,7 @@ class Opportunity(Base):
     __tablename__ = "opportunities"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    market_id: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    market_id: Mapped[str] = mapped_column(Text, unique=True, index=True)
     p_model: Mapped[float] = mapped_column(Float)
     implied_prob: Mapped[float] = mapped_column(Float)
     edge: Mapped[float] = mapped_column(Float)
@@ -22,7 +22,7 @@ class Opportunity(Base):
     confidence: Mapped[float] = mapped_column(Float)
     status: Mapped[str] = mapped_column(String(20), index=True)
     reasoning: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    model_name: Mapped[str] = mapped_column(String(100))
+    model_name: Mapped[str] = mapped_column(Text)
     scored_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

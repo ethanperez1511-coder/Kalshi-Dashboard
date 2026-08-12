@@ -21,6 +21,7 @@ from src.weather.archive import run_daily_archive
 from src.weather.digest import format_weather_digest, weather_digest
 from src.recorder.health import format_recorder_health, recorder_health
 from src.digest_health import record_section
+from src.bankroll_guard import assert_bankroll_workable
 from src.legacy_cutoff import mark_legacy_trades, resync_gate_counter
 from src.deployment_state import deployment_state, format_deployment_state
 from src.run_summary import write_summary
@@ -88,6 +89,9 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
 
     # Ensure trading settings exist (bankroll=$100, paper mode)
     ts = TradingSettings.get_or_create(engine)
+    # A zero bankroll sizes every Kelly position to zero: the cycle would
+    # approve trades, place nothing, and report success.
+    assert_bankroll_workable(engine)
     logger.info(f"Bankroll: ${ts.bankroll:.2f} | Mode: {ts.mode} | Paper trades: {ts.paper_trade_count}")
 
     # Step 0: Settle any open positions whose markets have finalized

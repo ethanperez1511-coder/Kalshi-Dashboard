@@ -67,10 +67,14 @@ def _seed_fit(engine, station="KNYC", lead=1, promoted=True, bias=0.4, sigma=3.2
     save_fit(engine, fit, promoted, [] if promoted else ["gate not cleared"],
              skill, slope, n_eval)
     if age_days:
+        # Age relative to the model's INJECTED clock, not the wall clock.
+        # Using real `now` made this test depend on today's date: when the date
+        # rolled over, the computed age slid from 8 days to exactly 7 and
+        # landed on the boundary.
         from src.models.weather import WeatherCellFit
         with get_session(engine) as s:
             row = s.query(WeatherCellFit).filter_by(station=station, lead_days=lead).first()
-            row.fitted_at = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=age_days)
+            row.fitted_at = TODAY - dt.timedelta(days=age_days)
             s.commit()
 
 

@@ -13,7 +13,7 @@ class Trade(Base):
     __tablename__ = "trades"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    market_id: Mapped[str] = mapped_column(String(100), index=True)
+    market_id: Mapped[str] = mapped_column(Text, index=True)
     side: Mapped[str] = mapped_column(String(10))  # "yes" or "no"
     action: Mapped[str] = mapped_column(String(10))  # "buy" or "sell"
     price: Mapped[int] = mapped_column(Integer)  # cents
@@ -27,7 +27,7 @@ class Trade(Base):
     reasoning: Mapped[str] = mapped_column(Text)
     is_paper: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(20), index=True)
-    order_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, default=None)
+    order_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
     exit_price: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
     realized_pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
     # Entry trading fee in DOLLARS, recorded at fill time. Paper stores the
@@ -59,7 +59,8 @@ class Trade(Base):
     # by ALTER TABLE ADD COLUMN on a populated table, and the migration guard
     # correctly refuses NOT NULL columns it cannot backfill.
     is_legacy: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default="0", index=True, nullable=False
+        # "false", not "0": Postgres booleans take a boolean literal.
+        Boolean, default=False, server_default="false", index=True, nullable=False
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

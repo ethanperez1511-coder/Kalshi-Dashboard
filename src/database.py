@@ -108,11 +108,37 @@ def pending_schema_changes(engine: Engine) -> List[str]:
         if table.name not in existing_tables:
             pending.append(f"{table.name} (new table)")
             continue
-        present = {c["name"] for c in inspector.get_columns(table.name)}
+        live = {c["name"]: c for c in inspector.get_columns(table.name)}
         for column in table.columns:
-            if column.name not in present:
+            if column.name not in live:
                 pending.append(f"{table.name}.{column.name}")
+            elif engine.dialect.name == "postgresql" and _widening(
+                engine, table.name, column, live[column.name]
+            ):
+                pending.append(f"{table.name}.{column.name} (widen)")
     return pending
+
+
+def _widening(engine: Engine, table_name: str, column: Column, existing: dict):
+    """DDL to widen an existing column, or None if no widening is needed.
+
+    WIDENING ONLY, never narrowing. A VARCHAR(n) whose model type is now TEXT
+    can be widened losslessly; the reverse would truncate data. Same for
+    INTEGER -> BIGINT.
+
+    This exists because SQLite ignores VARCHAR lengths entirely and Postgres
+    enforces them, so a column that was fine for months locally failed on the
+    first real Postgres insert: markets.title was VARCHAR(500) and a multi-leg
+    parlay title measured 1381 characters.
+    """
+    model_type = str(column.type).upper()
+    live_type = str(existing.get("type", "")).upper()
+
+    if "TEXT" in model_type and "VARCHAR" in live_type:
+        return f"ALTER COLUMN {column.name} TYPE TEXT"
+    if "BIGINT" in model_type and live_type in ("INTEGER", "INT", "INT4"):
+        return f"ALTER COLUMN {column.name} TYPE BIGINT"
+    return None
 
 
 def ensure_schema(engine: Engine) -> List[str]:
@@ -157,6 +183,25 @@ def ensure_schema(engine: Engine) -> List[str]:
                 conn.execute(text(f"ALTER TABLE {table.name} ADD COLUMN {fragment}"))
             added.append(f"{table.name}.{column.name}")
             logger.info("Schema migration: added %s.%s", table.name, column.name)
+
+        # Widen existing columns whose model type has outgrown the database's.
+        # SQLite ignores VARCHAR lengths, so this is a no-op there and the
+        # real work happens on Postgres.
+        if engine.dialect.name == "postgresql":
+            live = {c["name"]: c for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name not in live:
+                    continue
+                clause = _widening(engine, table.name, column, live[column.name])
+                if clause is None:
+                    continue
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE {table.name} {clause}"))
+                added.append(f"{table.name}.{column.name} (widened)")
+                logger.info(
+                    "Schema migration: widened %s.%s -> %s",
+                    table.name, column.name, column.type,
+                )
 
     return added
 

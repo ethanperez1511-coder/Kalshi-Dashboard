@@ -34,7 +34,7 @@ class OrderbookDeltaRaw(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    market_ticker: Mapped[str] = mapped_column(String(100), index=True)
+    market_ticker: Mapped[str] = mapped_column(Text, index=True)
     msg_type: Mapped[str] = mapped_column(String(24))       # snapshot | delta | trade
     sid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
     seq: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, default=None)
@@ -62,7 +62,7 @@ class OrderbookGap(Base):
     __tablename__ = "orderbook_gaps"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    market_ticker: Mapped[str] = mapped_column(String(100), index=True)
+    market_ticker: Mapped[str] = mapped_column(Text, index=True)
     sid: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
     expected_seq: Mapped[int] = mapped_column(BigInteger)
     received_seq: Mapped[int] = mapped_column(BigInteger)

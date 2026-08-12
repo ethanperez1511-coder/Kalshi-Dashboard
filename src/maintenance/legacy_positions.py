@@ -76,7 +76,7 @@ class Reconciliation:
     by_model: Dict[str, int] = field(default_factory=dict)
     attribution_sources: Dict[str, int] = field(default_factory=dict)
     positions: List[PositionView] = field(default_factory=list)
-    bankroll: float = 0.0
+    bankroll: Optional[float] = None
 
     @property
     def to_close(self) -> List[PositionView]:
@@ -131,7 +131,9 @@ def reconcile(engine: Engine) -> Reconciliation:
         from src.models.settings import TradingSettings
 
         settings = session.query(TradingSettings).first()
-        report.bankroll = settings.bankroll if settings else 0.0
+        # None is not zero: before the first cycle there is no row at all, and
+        # reporting that as "$0.00 bankroll" reads as a drained account.
+        report.bankroll = settings.bankroll if settings else None
 
         open_positions = session.execute(
             select(Position.market_id, Position.side, Position.entry_price,
@@ -233,7 +235,8 @@ def format_report(report: Reconciliation, executed: Optional[List[dict]] = None)
         "PRODUCTION TRADE RECORD",
         f"  trades: {report.total_trades} total, {report.paper_trades} paper, "
         f"{report.legacy_trades} legacy",
-        f"  bankroll: ${report.bankroll:.2f}",
+        f"  bankroll: ${report.bankroll:.2f}" if report.bankroll is not None
+        else "  bankroll: NO SETTINGS ROW YET (first cycle creates it at $100.00)",
         "  per-model attribution:",
     ]
     for model, count in sorted(report.by_model.items(), key=lambda kv: -kv[1]):

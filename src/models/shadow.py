@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import DateTime, Integer, Numeric, String, Text
+from sqlalchemy import BigInteger, DateTime, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.database import Base
@@ -28,7 +28,7 @@ class ShadowMakerOrder(Base):
     __tablename__ = "shadow_maker_orders"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    market_id: Mapped[str] = mapped_column(String(100), index=True)
+    market_id: Mapped[str] = mapped_column(Text, index=True)
     category: Mapped[str] = mapped_column(String(60), index=True, default="")
     model_name: Mapped[Optional[str]] = mapped_column(String(60), nullable=True, default=None)
     side: Mapped[str] = mapped_column(String(8))
@@ -55,7 +55,8 @@ class ShadowMakerOrder(Base):
     status: Mapped[str] = mapped_column(String(16), index=True)
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
 
-    rest_start_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    # BigInteger: an epoch-ms value is ~1.79e12 and overflows int4 on Postgres.
+    rest_start_ms: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
     )

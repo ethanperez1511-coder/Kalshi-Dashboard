@@ -244,3 +244,27 @@ the derived condition too: a production job that quietly fell back to the local
 SQLite default would have gone green while writing to a container filesystem
 that is deleted when the job ends, reporting success and persisting nothing.
 Falling back is not always safer than crashing.
+
+## L15 — SQLite-lenient is not Postgres-strict. Test against the real engine.
+
+`markets.title` was VARCHAR(500). SQLite ignores VARCHAR lengths entirely, so
+months of local runs and 600+ green tests could not catch it. The first real
+Postgres insert failed on a multi-leg parlay title measured at 1,381 characters.
+
+Auditing the class rather than the instance found two more that had never
+executed on Postgres: `shadow_maker_orders.rest_start_ms` was Integer while
+holding an epoch-ms value of ~1.79e12, which overflows int4; and a boolean
+column carried `server_default="0"`, which Postgres rejects in favour of a
+boolean literal.
+
+**Rule:** for every column, ask which engine enforces the constraint. Anything
+SQLite ignores — string length, integer width, type coercion, boolean literals —
+is untested by a local suite however green it is. Either test against Postgres,
+or assert the schema's *shape* in tests that run anywhere: no length limit on
+columns fed by unbounded API text, BigInteger on anything holding epoch
+milliseconds, boolean literals in boolean defaults. Measure the real data before
+choosing a bound — the title limit was not a close call, it was 2.8x over.
+
+Corollary, from the same session: a test that computes an age from the wall
+clock while the code under test uses an injected clock will pass until the date
+rolls over. Pin fixtures to the injected clock.

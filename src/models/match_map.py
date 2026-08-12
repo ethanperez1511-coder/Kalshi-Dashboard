@@ -28,8 +28,8 @@ class MarketMatchMap(Base):
     __tablename__ = "market_match_map"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    kalshi_market_id: Mapped[str] = mapped_column(String(100), index=True, unique=True)
-    poly_condition_id: Mapped[str] = mapped_column(String(120))
+    kalshi_market_id: Mapped[str] = mapped_column(Text, index=True, unique=True)
+    poly_condition_id: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), index=True)  # approved|blocked|pending
     similarity: Mapped[float] = mapped_column(Float, default=0.0)
     # Human-readable titles, kept so the review queue can be rendered without
