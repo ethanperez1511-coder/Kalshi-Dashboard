@@ -12,6 +12,7 @@ from src.models.market import (
     TERMS_UNSUPPORTED,
 )
 from src.weather.terms import (
+    is_in_scope,
     is_temperature_market,
     is_unsupported_type,
     parse_contract_terms,
@@ -31,6 +32,14 @@ def _terms_fields(km: KalshiMarket) -> dict:
         return {
             "strike_direction": None, "strike_value": None,
             "strike_unit": None, "terms_status": TERMS_NOT_APPLICABLE,
+        }
+
+    if not is_in_scope(km):
+        # A temperature market for a station we do not model. Not a parse
+        # failure — there is no fit for it and never was.
+        return {
+            "strike_direction": None, "strike_value": None,
+            "strike_unit": None, "terms_status": TERMS_UNSUPPORTED,
         }
 
     if is_unsupported_type(km):

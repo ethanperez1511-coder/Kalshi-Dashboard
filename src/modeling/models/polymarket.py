@@ -21,6 +21,7 @@ from src.models.market import Market
 from src.modeling.base import BaseModel, ModelResult, MODEL_TYPE_INDEPENDENT
 from src.modeling.entities import compare, extract
 from src.modeling.match_store import (
+    all_decisions,
     get_decision,
     record_auto_approved,
     record_pending,
@@ -63,10 +64,25 @@ def _similarity(a: Set[str], b: Set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
+def build_candidate_index(candidates: List[PolyMarket]) -> List[tuple]:
+    """Tokenise every candidate ONCE.
+
+    `_match_market` used to call `_normalize_tokens` on every candidate for
+    every market being scored — ~2,000 regex passes per market, repeated for the
+    whole universe. Pure CPU, invisible in query counts, and the largest single
+    component of a 191-second scoring stage.
+    """
+    return [
+        (cand, _normalize_tokens(cand.question), _numbers_in(cand.question))
+        for cand in candidates
+    ]
+
+
 def _match_market(
     title: str,
     candidates: List[PolyMarket],
     min_similarity: float = POLYMARKET_MIN_SIMILARITY,
+    index: Optional[List[tuple]] = None,
 ) -> Optional[PolyMarket]:
     """Find the one Polymarket market for a Kalshi title, or None.
 
@@ -76,12 +92,15 @@ def _match_market(
     tokens = _normalize_tokens(title)
     numbers = _numbers_in(title)
 
+    if index is None:
+        index = build_candidate_index(candidates)
+
     scored = []
-    for cand in candidates:
-        sim = _similarity(tokens, _normalize_tokens(cand.question))
+    for cand, cand_tokens, cand_numbers in index:
+        sim = _similarity(tokens, cand_tokens)
         if sim < min_similarity:
             continue
-        if _numbers_in(cand.question) != numbers:
+        if cand_numbers != numbers:
             # Same words, different threshold/date = a different market.
             continue
         scored.append((sim, cand))
@@ -105,6 +124,10 @@ class PolymarketModel(BaseModel):
 
     def __init__(self, poly_client: Optional[PolymarketClient] = None):
         self._client = poly_client or PolymarketClient(max_markets=POLYMARKET_SCAN_LIMIT)
+        # Built once per cycle. The registry constructs one model per scoring
+        # run, so instance scope is cycle scope.
+        self._index: Optional[List[tuple]] = None
+        self._decisions: Optional[dict] = None
 
     @property
     def category(self) -> str:
@@ -132,7 +155,10 @@ class PolymarketModel(BaseModel):
             return None
 
         # 1. A recorded decision outranks any amount of string similarity.
-        decision = get_decision(engine, market_id)
+        # Loaded for every market in one query rather than one query per market.
+        if self._decisions is None:
+            self._decisions = all_decisions(engine)
+        decision = self._decisions.get(market_id)
         if decision is not None:
             status, condition_id = decision
             if status == "blocked":
@@ -142,8 +168,10 @@ class PolymarketModel(BaseModel):
             if status == "approved":
                 return self._from_approved(market_id, condition_id, candidates)
 
-        liquid = [c for c in candidates if c.volume_usd >= POLYMARKET_MIN_VOLUME_USD]
-        match = _match_market(title, liquid)
+        if self._index is None:
+            liquid = [c for c in candidates if c.volume_usd >= POLYMARKET_MIN_VOLUME_USD]
+            self._index = build_candidate_index(liquid)
+        match = _match_market(title, [], index=self._index)
         if match is None:
             return None  # nothing plausible; nothing to review either
 

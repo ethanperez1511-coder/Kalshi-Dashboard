@@ -316,3 +316,42 @@ it stops taking new work and returns what it has. Ingest is idempotent and the
 next cycle is minutes away, so a partial ingest is worth far more than a
 cancelled tick — twice now, one bad stage has destroyed scoring, settlement and
 the digest along with it.
+
+## L18 — Batching the caller is not batching the system, and a statement counter only sees half the problem.
+
+The scorer's own queries were batched first (L16), and the next production
+cycle still spent 191s to score one market. The remaining cost was inside the
+models, in two forms:
+
+**Queries the scorer does not issue.** `PolymarketModel` called `get_decision`
+per market; `WeatherModel` loaded terms, the cell fit, the guard state, the
+sibling ladder and an HTTP MOS forecast per contract — six of each for one
+city-day ladder that shares all six. Batch the layer you profiled and the next
+layer down inherits the whole per-market cost.
+
+**Work no statement counter can see.** `_match_market` re-tokenised every
+Polymarket candidate for every market scored: 200 candidates x 40 markets =
+8,040 regex passes in the test, ~2,000 per market at the production scan limit.
+Zero queries, no I/O, and the largest single component of the stage. A
+round-trip test would have passed while the stage timed out — so the CPU test
+counts `_normalize_tokens` calls directly.
+
+**And the ordering matters as much as the speed.** The scoring loop had no
+`ORDER BY`. Under a time budget an arbitrary order means an arbitrary slice
+survives the axe, so there was no guarantee the weather ladder — the one
+independent model with a validated fit — was reached at all. A truncated stage
+must truncate the *tail*, which means the order has to be deliberate:
+`volume DESC, market_id` (liquidity first, ties broken deterministically).
+
+## L19 — A substring is not a word.
+
+`"temp" in title` classified "Will Juno Temple perform as Moneypenny in the
+next James Bond film?" as a temperature contract, which then failed the weather
+parser and was reported to me as an unreadable threshold contract. Use
+`\btemp(erature)?\b`.
+
+The second half is worth more: the other three alarms were real temperature
+markets for a station we do not model (Texas, average daily *minimum* across two
+airports). Correct refusals wearing an alarm's label. **Separate "I cannot read
+this" from "I read it and it is out of scope"** — pooling them turns an alarm
+that should be investigated into noise that gets ignored.

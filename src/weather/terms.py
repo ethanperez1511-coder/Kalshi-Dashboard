@@ -193,10 +193,31 @@ def _from_title(title: str) -> Optional[ContractTerms]:
     return ContractTerms(direction, value, "F", "title")
 
 
+# Word-boundary, not a substring. `"temp" in title` matched "Juno Temple",
+# "attempt", "contemporary" and "temporary" — a James Bond casting market
+# reached the weather parser and was reported as an unreadable contract.
+_TEMPERATURE_RE = re.compile(r"\btemp(erature)?\b", re.IGNORECASE)
+
+
 def is_temperature_market(market) -> bool:
-    """Only daily high-temperature contracts are in scope for this parser."""
-    title = (getattr(market, "title", "") or "").lower()
-    return "temp" in title
+    """Does this contract ask about a temperature at all?"""
+    return bool(_TEMPERATURE_RE.search(getattr(market, "title", "") or ""))
+
+
+def is_in_scope(market) -> bool:
+    """Is it a temperature contract we could actually price?
+
+    Scope is the station map: a fit exists per (station, lead), so a
+    temperature market for a station we do not model is out of scope rather
+    than unreadable. The distinction matters because "unreadable" is an alarm
+    the design says to investigate, and three of the four alarms in the first
+    production digest were correct refusals wearing the wrong label — Texas
+    contracts on the AVERAGE DAILY MINIMUM across two airports, which is
+    neither a station we map nor the statistic we fit.
+    """
+    from src.weather.stations import station_for_market
+
+    return station_for_market(getattr(market, "ticker", "") or "") is not None
 
 
 def is_unsupported_type(market) -> bool:

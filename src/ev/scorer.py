@@ -96,6 +96,12 @@ def score_all_markets(
             .join(PriceSnapshot, PriceSnapshot.id == newest.c.snap_id)
             .where(Market.status.in_(["open", "active"]))
             .where(PriceSnapshot.timestamp >= cutoff)
+            # Deterministic, and ordered by the thing that predicts qualifying:
+            # liquidity. Previously unordered, so if the budget cut the loop
+            # short it truncated an arbitrary slice — a market might be scored
+            # one cycle and skipped the next for no reason, and there was no
+            # guarantee the liquid markets were reached at all.
+            .order_by(PriceSnapshot.volume.desc(), Market.market_id)
         ).all()
         markets = [
             {

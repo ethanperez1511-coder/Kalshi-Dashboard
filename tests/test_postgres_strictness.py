@@ -316,3 +316,160 @@ class TestBatchedWrites:
         # gate discarded anyway. Snapshot load and opportunity upsert are now
         # batched, and gated-off models no longer run at all.
         assert counter["n"] < 60, f"{counter['n']} statements for 300 markets"
+
+
+# --------------------------------------------------------------------------
+# Round-trip counts, part 2: inside the models
+# --------------------------------------------------------------------------
+
+class TestBatchedModelQueries:
+    """The scorer's own queries were batched first, and the stage still took
+    191 seconds and scored one market. The rest was inside the models: a
+    decision lookup per market, a fit/guard/terms/ladder lookup per market, and
+    — invisible to any statement counter — a full re-tokenisation of every
+    Polymarket candidate per market.
+    """
+
+    @staticmethod
+    def _counter(engine):
+        from sqlalchemy import event
+
+        box = {"n": 0}
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def _count(conn, cursor, statement, params, context, executemany):
+            box["n"] += 1
+
+        return box
+
+    # -- Polymarket ------------------------------------------------------
+
+    def test_polymarket_does_not_query_decisions_per_market(self, db_engine):
+        from src.modeling.models.polymarket import PolymarketModel
+        from src.modeling.polymarket_api import PolyMarket
+
+        class _Client:
+            def get_markets(self):
+                return [PolyMarket(question=f"Will thing {i} happen in 2026?",
+                                   yes_price=0.4, volume_usd=500_000.0)
+                        for i in range(50)]
+
+        model = PolymarketModel(poly_client=_Client())
+        box = self._counter(db_engine)
+        for i in range(100):
+            model.estimate(f"K-{i}", f"Will other thing {i} occur by 2027?", 0.5, db_engine)
+        # One all_decisions() load, and nothing after it. Was 1 per market.
+        assert box["n"] < 10, f"{box['n']} statements for 100 markets"
+
+    def test_polymarket_tokenises_each_candidate_once(self, db_engine, monkeypatch):
+        """The cost a statement counter cannot see.
+
+        `_match_market` ran `_normalize_tokens` over the whole candidate set for
+        every market scored. At the production scan limit that is ~2,000 regex
+        passes per market — pure CPU, zero queries, and the single largest
+        component of the 191-second stage.
+        """
+        from src.modeling.models import polymarket as pm
+        from src.modeling.polymarket_api import PolyMarket
+
+        candidates = [PolyMarket(question=f"Will thing {i} happen in 2026?",
+                                 yes_price=0.4, volume_usd=500_000.0)
+                      for i in range(200)]
+
+        class _Client:
+            def get_markets(self):
+                return candidates
+
+        calls = {"n": 0}
+        real = pm._normalize_tokens
+
+        def _spy(title):
+            calls["n"] += 1
+            return real(title)
+
+        monkeypatch.setattr(pm, "_normalize_tokens", _spy)
+
+        model = pm.PolymarketModel(poly_client=_Client())
+        markets = 40
+        for i in range(markets):
+            model.estimate(f"K-{i}", f"Will other thing {i} occur by 2027?", 0.5, db_engine)
+
+        # 200 candidates tokenised once, plus one pass per market title.
+        # The old code cost 200 * 40 = 8,000.
+        assert calls["n"] <= len(candidates) + 2 * markets, (
+            f"{calls['n']} tokenisations for {markets} markets against "
+            f"{len(candidates)} candidates — candidate set is being re-tokenised"
+        )
+
+    def test_polymarket_index_is_per_cycle_not_per_process(self):
+        """Cycle scope comes from the model being rebuilt each run. If the cache
+        were module-level, a market listed mid-session would never be seen."""
+        from src.modeling.models.polymarket import PolymarketModel
+        from src.modeling.polymarket_api import PolyMarket
+
+        class _Client:
+            def get_markets(self):
+                return [PolyMarket(question="Will thing happen in 2026?",
+                                   yes_price=0.4, volume_usd=500_000.0)]
+
+        assert PolymarketModel(poly_client=_Client())._index is None
+        assert PolymarketModel(poly_client=_Client())._decisions is None
+
+    # -- Weather ---------------------------------------------------------
+
+    def test_weather_does_not_query_per_contract_in_a_ladder(self, db_engine):
+        """A city-day ladder is six contracts sharing one station, one fit, one
+        guard and one MOS forecast. It was six of each."""
+        import datetime as dtm
+
+        from src.database import get_session
+        from src.models.market import Market as M, TERMS_PARSED
+        from src.models.price import PriceSnapshot
+        from src.weather.calibration import CellFit
+        from src.weather.fitting import save_fit
+        from src.weather.model import WeatherModel
+
+        from tests.test_weather_model import TODAY, _Mos
+
+        Base.metadata.create_all(db_engine)
+        tickers = [f"KXHIGHNY-26AUG12-T{t}" for t in (80, 85, 90, 95, 100, 105)]
+        with get_session(db_engine) as s:
+            for i, ticker in enumerate(tickers):
+                s.add(M(
+                    market_id=ticker, title="Will the high temp in NYC be >90°?",
+                    category="Climate and Weather",
+                    close_date=dtm.datetime(2026, 8, 13, 4, 59, tzinfo=dtm.timezone.utc),
+                    status="open", series_ticker="KXHIGHNY",
+                    strike_direction="above", strike_value=80.0 + 5 * i,
+                    strike_unit="F", terms_status=TERMS_PARSED,
+                ))
+                s.add(PriceSnapshot(market_id=ticker, yes_bid=40, yes_ask=44,
+                                    last_price=42, volume=500))
+            s.commit()
+        save_fit(
+            db_engine,
+            CellFit("KNYC", 1, 0.4, 3.2, 160, dtm.date(2025, 4, 1), dtm.date(2025, 8, 31)),
+            True, [], 0.62, 1.03, 105,
+        )
+
+        http = _Mos(temp=93.0)
+        fetches = {"n": 0}
+        real_get = http.get
+
+        def _counted_get(*a, **kw):
+            fetches["n"] += 1
+            return real_get(*a, **kw)
+
+        http.get = _counted_get
+        model = WeatherModel(http=http, now=lambda: TODAY)
+
+        box = self._counter(db_engine)
+        results = [model.estimate(t, "t", 0.42, db_engine) for t in tickers]
+
+        assert all(r is not None for r in results), "ladder should price"
+        # terms + fit + guard + ladder, each loaded once for the whole ladder.
+        assert box["n"] < 15, f"{box['n']} statements for {len(tickers)} contracts"
+        assert fetches["n"] == 1, (
+            f"{fetches['n']} MOS fetches for one station-day — the forecast is "
+            "identical for every contract on the ladder"
+        )

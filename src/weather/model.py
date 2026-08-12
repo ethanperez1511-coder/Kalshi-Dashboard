@@ -80,6 +80,14 @@ class WeatherModel(BaseModel):
     def __init__(self, http=None, now=None):
         self._http = http
         self._now = now or (lambda: dt.datetime.now(dt.timezone.utc))
+        # Per-cycle caches. Each of these was a query — or, for MOS, an HTTP
+        # fetch — repeated for every market being scored. The registry builds
+        # one model per scoring run, so instance scope is cycle scope.
+        self._terms_cache = None
+        self._fit_cache = {}
+        self._guard_cache = {}
+        self._forecast_cache = {}
+        self._ladder_cache = {}
 
     @property
     def category(self) -> str:
@@ -95,16 +103,24 @@ class WeatherModel(BaseModel):
     # -- helpers ---------------------------------------------------------
 
     def _terms(self, engine: Engine, market_id: str):
-        with get_session(engine) as session:
-            row = session.query(Market).filter_by(market_id=market_id).first()
-            if row is None:
-                return None
-            return {
-                "terms_status": row.terms_status,
-                "direction": row.strike_direction,
-                "strike": row.strike_value,
-                "series": row.series_ticker,
+        """Contract terms for every parsed threshold market, loaded once."""
+        if self._terms_cache is None:
+            with get_session(engine) as session:
+                rows = session.execute(
+                    select(
+                        Market.market_id, Market.terms_status,
+                        Market.strike_direction, Market.strike_value,
+                        Market.series_ticker,
+                    ).where(Market.terms_status == TERMS_PARSED)
+                ).all()
+            self._terms_cache = {
+                r[0]: {
+                    "terms_status": r[1], "direction": r[2],
+                    "strike": r[3], "series": r[4],
+                }
+                for r in rows
             }
+        return self._terms_cache.get(market_id)
 
     def _ladder(self, engine: Engine, series: str, target: dt.date) -> List[LadderPoint]:
         """Sibling contracts for the same station-day, with their market prices.
@@ -164,32 +180,48 @@ class WeatherModel(BaseModel):
         if lead < 1 or lead > MAX_PRICEABLE_LEAD:
             return None
 
-        fit_record = load_fit(engine, station.mos_station, lead)
+        cache_key = (station.mos_station, lead)
+        if cache_key not in self._fit_cache:
+            self._fit_cache[cache_key] = load_fit(engine, station.mos_station, lead)
+        fit_record = self._fit_cache[cache_key]
         ok, reason = cell_priceable(fit_record, self._now())
         if not ok:
             logger.info("Weather: %s unpriceable — %s", market_id, reason)
             return None
 
-        paused, guard_reason = guard_paused(engine, station.series_ticker)
+        if station.series_ticker not in self._guard_cache:
+            self._guard_cache[station.series_ticker] = guard_paused(
+                engine, station.series_ticker,
+            )
+        paused, guard_reason = self._guard_cache[station.series_ticker]
         if paused:
             logger.warning("Weather: %s paused — %s", market_id, guard_reason)
             return None
 
-        try:
-            forecast = mos.forecast_for(
-                station.mos_station, target, lead,
-                **({"http": self._http} if self._http is not None else {}),
-            )
-        except mos.MosUnavailable as exc:
-            logger.info("Weather: %s unpriceable — %s", market_id, exc)
-            return None
+        # One MOS fetch per (station, target, lead) per cycle, not per contract.
+        # A city-day ladder is six contracts sharing one forecast, so this was
+        # six identical HTTP calls.
+        forecast_key = (station.mos_station, target, lead)
+        if forecast_key not in self._forecast_cache:
+            try:
+                self._forecast_cache[forecast_key] = mos.forecast_for(
+                    station.mos_station, target, lead,
+                    **({"http": self._http} if self._http is not None else {}),
+                )
+            except mos.MosUnavailable as exc:
+                logger.info("Weather: %s unpriceable — %s", market_id, exc)
+                self._forecast_cache[forecast_key] = None
+        forecast = self._forecast_cache[forecast_key]
         if forecast is None:
             return None
 
         fit = fit_record.as_cell_fit()
         predicted = fit.predict_mean(forecast.max_temp_f)
 
-        verdict = check_forecast(predicted, self._ladder(engine, terms["series"], target))
+        ladder_key = (terms["series"], target)
+        if ladder_key not in self._ladder_cache:
+            self._ladder_cache[ladder_key] = self._ladder(engine, terms["series"], target)
+        verdict = check_forecast(predicted, self._ladder_cache[ladder_key])
         if not verdict.ok:
             logger.error(
                 "Weather SUSPECT %s: %s", market_id, verdict.reason,

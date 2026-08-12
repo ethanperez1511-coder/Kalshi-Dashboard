@@ -26,7 +26,11 @@ from datetime import datetime, timezone
 import pytest
 
 from src.kalshi.schemas import KalshiMarket
-from src.weather.terms import ContractTerms, parse_contract_terms
+from src.weather.terms import (
+    ContractTerms,
+    is_temperature_market,
+    parse_contract_terms,
+)
 
 
 def _market(**kw) -> KalshiMarket:
@@ -205,3 +209,54 @@ def test_non_weather_market_returns_none():
         category="Politics", strike_type="", floor_strike=None,
         subtitle="", yes_sub_title="",
     )) is None
+
+
+# --------------------------------------------------------------------------
+# 6. Classifier scope — the four "unreadable" contracts in production
+# --------------------------------------------------------------------------
+
+class TestClassifierScope:
+    """The first production digest reported 4 unreadable threshold contracts.
+    Investigating them, per the design rule, found two different causes and
+    neither was a parser bug."""
+
+    def _m(self, ticker, title):
+        return _market(ticker=ticker, title=title, strike_type="",
+                       floor_strike=None, cap_strike=None, subtitle="",
+                       yes_sub_title="")
+
+    @pytest.mark.parametrize("title", [
+        "Will Juno Temple perform as Moneypenny in the next James Bond film?",
+        "Will they attempt a reboot before 2027?",
+        "Will contemporary art sales exceed $1bn?",
+        "Will the temporary ban be lifted?",
+    ])
+    def test_words_containing_temp_are_not_temperature_markets(self, title):
+        """`"temp" in title` matched all of these. A James Bond casting market
+        reached the weather parser and was reported as an unreadable contract."""
+        assert is_temperature_market(self._m("KXOTHER-X", title)) is False
+
+    def test_real_temperature_markets_still_match(self):
+        assert is_temperature_market(
+            self._m("KXHIGHNY-26AUG12-T90", "Will the **high temp in NYC** be >90°?")
+        ) is True
+        assert is_temperature_market(
+            self._m("KXTXURI-1", "Will the average daily minimum temperature fall below 20°?")
+        ) is True
+
+    def test_a_station_we_model_is_in_scope(self):
+        from src.weather.terms import is_in_scope
+
+        assert is_in_scope(self._m("KXHIGHNY-26AUG12-T90", "high temp")) is True
+
+    def test_a_temperature_market_we_cannot_price_is_out_of_scope(self):
+        """The three Texas contracts: average daily MINIMUM across two airports.
+        Neither a station we map nor the statistic we fit — so out of scope,
+        not unreadable. 'Unreadable' is an alarm the design says to chase, and
+        a correct refusal wearing that label wastes the alarm."""
+        from src.weather.terms import is_in_scope
+
+        assert is_in_scope(
+            self._m("KXTXURI-28DEC31-27JAN01",
+                    "Will the average daily minimum temperature in Texas fall below 20°?")
+        ) is False

@@ -36,6 +36,22 @@ def get_decision(engine: Engine, kalshi_market_id: str) -> Optional[Tuple[str, s
         return (row.status, row.poly_condition_id) if row else None
 
 
+def all_decisions(engine: Engine) -> Dict[str, Tuple[str, str]]:
+    """Every recorded decision in one query.
+
+    get_decision() per market is one network round-trip each; against Neon that
+    is the difference between a scoring stage that finishes and one that does
+    not.
+    """
+    if engine is None:
+        return {}
+    with get_session(engine) as session:
+        return {
+            row.kalshi_market_id: (row.status, row.poly_condition_id)
+            for row in session.query(MarketMatchMap).all()
+        }
+
+
 def _upsert(engine: Engine, kalshi_market_id: str, **fields) -> None:
     if engine is None:
         return
