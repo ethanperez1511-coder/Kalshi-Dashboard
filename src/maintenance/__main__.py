@@ -89,11 +89,6 @@ def main(argv=None) -> int:
     write_summary(headline, text[:4000], ok=True)
     return 0
 
-
-if __name__ == "__main__":
-    sys.exit(main())
-
-
 def _retire(engine, shas, token: str) -> int:
     """Retire named deploys. Dry run unless the token matches exactly."""
     plan = plan_retirement(engine, shas)
@@ -131,3 +126,7 @@ def _retire(engine, shas, token: str) -> int:
     )
     write_summary(headline, text[:4000], ok=True)
     return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

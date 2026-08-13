@@ -471,3 +471,32 @@ not a test of the formula.**
 The corollary that caught this one: where two paths are meant to be symmetric,
 assert the symmetry directly. The YES side satisfied `EV == edge` at zero fees
 and the NO side did not, and that one line was the entire bug.
+
+## L27 — Importing a module and running it are different programs. Test the one production runs.
+
+`_retire` was defined below `if __name__ == "__main__": sys.exit(main())`.
+Under `python -m src.maintenance` the interpreter reaches the guard and calls
+`main()` before it ever binds that name — NameError on the first real dispatch.
+Under `import`, the whole file executes first and the name is there.
+
+`retire_deploy.py` had eighteen passing tests. The entry-point tests called
+`entry.main(argv)` after importing the module, which is the second program, not
+the first. Every one of them passed against code that could not run at all.
+
+This is the third time the same shape has bitten: `run_pipeline`'s unassigned
+`clock`, thirteen unpushed commits, and now this. The unit under test was
+correct in each case and the wiring around it had no test.
+
+Two rules:
+
+**Execute the entry point the way the deployment executes it.** For a module,
+that is `runpy.run_module(name, run_name="__main__")`, not an import followed
+by a call — patch the SOURCE modules, since runpy rebinds every `from x import
+y` on re-execution. For a workflow, that means every argument combination the
+workflow can dispatch, run for real against a seeded database. Two free-text
+inputs is five reachable branches, not one happy path.
+
+**Then kill the class, not the instance.** A test now asserts that NO module in
+the tree has anything after its `__main__` guard. That check found no other
+offenders today, which is the point: it will find the next one on the day it is
+written rather than on the day it is dispatched.
