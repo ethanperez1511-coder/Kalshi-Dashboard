@@ -17,6 +17,8 @@ from src.demo.seed import seed_demo_data
 from src.ingestion.live_ingest import ingest_live_markets
 from src.ev.calculator import EVResult
 from src.ev.funnel import ScoreFunnel
+from src.execution.funnel import ExecutionFunnel
+from src.maintenance.expire_markets import expire_closed_markets
 from src.ev.scorer import score_all_markets
 from src.kalshi.client import KalshiClient
 from src.trading_config import INGEST_BUDGET_SECONDS, SCORE_BUDGET_SECONDS
@@ -165,6 +167,17 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     except Exception:
         logger.warning("Guard event check failed (non-fatal)", exc_info=True)
 
+    # One UPDATE, before scoring, so the funnel's denominator is the live
+    # universe rather than every market ever ingested. sync_markets only writes
+    # status for rows the current fetch returned, so a market that closes keeps
+    # status='open' forever unless something reconciles it.
+    try:
+        expired = expire_closed_markets(engine)
+        if expired:
+            logger.info("Marked %d past-close markets as closed", expired)
+    except Exception:
+        logger.warning("Market expiry sweep failed (non-fatal)", exc_info=True)
+
     # Step 1: Score all markets
     logger.info("=== Scoring markets ===")
     score_deadline = Deadline(SCORE_BUDGET_SECONDS, "scoring")
@@ -258,6 +271,10 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
 
     te = TradeEngine(engine, kalshi_client=kalshi_client)
     trades_placed = 0
+    # Same instrumentation the scoring stage got, one layer down: six
+    # opportunities qualified and one traded, and the reason for the other five
+    # went to logger.info and nowhere else.
+    exec_funnel = ExecutionFunnel(qualifying=len(qualifying))
 
     logger.info("=== Evaluating and executing trades ===")
     for opp in qualifying:
@@ -282,6 +299,7 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
 
         if not decision.approved:
             logger.info(f"  ✗ {opp['market_id']}: REJECTED — {decision.rejection_reasons}")
+            exec_funnel.record_rejection(decision.rejection_reasons)
             continue
 
         result = te.execute(
@@ -298,18 +316,33 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
             model_name=opp.get("model_name", ""),
         )
 
+        if not result:
+            # Approved by risk, then produced no trade: an order that did not
+            # fill, a client error, a market that moved. Distinct from a risk
+            # refusal and previously indistinguishable from one.
+            logger.warning("  ✗ %s: approved but execution returned nothing",
+                           opp["market_id"])
+            exec_funnel.execution_returned_nothing += 1
         if result:
             trades_placed += 1
+            exec_funnel.placed += 1
             tag = "PAPER" if result.get("is_paper", True) else f"LIVE [{result.get('status', '?')}]"
             logger.info(
                 f"  ✓ {tag} TRADE: {result['market_id']} "
                 f"{result['side'].upper()} ×{result['quantity']} @ {result['price']}¢ "
                 f"(${result['dollars']:.2f})"
             )
-            alerter.trade(
+            exec_funnel.alerts_attempted += 1
+            if alerter.trade(
                 result["market_id"], result["side"], result["quantity"],
                 result["price"], result["dollars"], result.get("is_paper", True),
-            )
+            ):
+                exec_funnel.alerts_delivered += 1
+            else:
+                logger.error(
+                    "Trade alert NOT delivered for %s — the trade is real and "
+                    "the notification is not", result["market_id"],
+                )
 
     # Summary
     logger.info("=== Portfolio Summary ===")
@@ -318,6 +351,18 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     positions = tracker.get_open_positions()
 
     logger.info(f"Trades placed this run: {trades_placed}")
+    logger.info("\n" + exec_funnel.format())
+    if not exec_funnel.balances():
+        logger.error(
+            "Execution funnel does not balance: %d qualifying, %d attributed",
+            exec_funnel.qualifying, exec_funnel.attributed(),
+        )
+    write_summary(
+        f"Execution: {exec_funnel.headline()}",
+        exec_funnel.format(),
+        ok=exec_funnel.balances()
+        and exec_funnel.alerts_delivered == exec_funnel.alerts_attempted,
+    )
     logger.info(f"Bankroll: ${summary['bankroll']:.2f}")
 
     # Milestone alerts

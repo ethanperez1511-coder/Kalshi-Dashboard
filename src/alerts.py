@@ -11,7 +11,16 @@ logger = logging.getLogger(__name__)
 _BASE = "https://api.telegram.org/bot{token}/sendMessage"
 
 
-def _send(token: str, chat_id: str, text: str) -> None:
+def _send(token: str, chat_id: str, text: str) -> bool:
+    """True if Telegram accepted the message.
+
+    The return value matters: this used to swallow every exception into a
+    warning, so a trade that alerted and a trade that silently failed to alert
+    were indistinguishable from outside the log. An alerting channel whose own
+    failures are only visible in the thing it exists to replace is not a
+    channel. It still never raises — a reporting failure must not fail a
+    trading cycle — but the caller can now count it.
+    """
     try:
         resp = httpx.post(
             _BASE.format(token=token),
@@ -19,8 +28,10 @@ def _send(token: str, chat_id: str, text: str) -> None:
             timeout=10.0,
         )
         resp.raise_for_status()
+        return True
     except Exception as e:
         logger.warning(f"Telegram alert failed: {e}")
+        return False
 
 
 def _deployed_line() -> str:
@@ -49,13 +60,15 @@ class Alerter:
                 "No trade/settlement/error/heartbeat notifications will be sent."
             )
 
-    def send(self, text: str) -> None:
-        if self._enabled:
-            _send(self._token, self._chat_id, text)
+    def send(self, text: str) -> bool:
+        """True if the message was delivered. False if disabled or refused."""
+        if not self._enabled:
+            return False
+        return _send(self._token, self._chat_id, text)
 
-    def trade(self, market_id: str, side: str, qty: int, price: int, dollars: float, is_paper: bool) -> None:
+    def trade(self, market_id: str, side: str, qty: int, price: int, dollars: float, is_paper: bool) -> bool:
         tag = "📝 PAPER" if is_paper else "💰 LIVE"
-        self.send(
+        return self.send(
             f"{tag} TRADE\n"
             f"<b>{market_id}</b>\n"
             f"{side.upper()} ×{qty} @ {price}¢ (${dollars:.2f})"

@@ -679,3 +679,35 @@ backfill).
       "temporary" and similar all match. Narrow it to the temperature series /
       structured strike shape rather than a substring, and add the Bond ticker
       as a regression fixture.
+
+## BLOCKED ON APPROVAL — correlated-cluster key collapses seven independent cities
+
+`_extract_cluster_key` returns `market_id.split("-")[1]`. Its own docstring says
+"For non-MVE tickers, fall back to the full market_id" and **the code does not
+do that**. Demonstrated:
+
+    KXHIGHNY-26AUG13-T92   -> '26AUG13'
+    KXHIGHAUS-26AUG13-T99  -> '26AUG13'
+    KXHIGHMIA-26AUG13-T88  -> '26AUG13'
+    KXMVESPORTSMULTIGAMEEXTENDED-S2026XXXX-YYYY -> 'S2026XXXX'   (correct)
+
+So every weather contract on the same date, across all seven cities, shares one
+cluster and one $10 cap (10% of a $100 bankroll). New York and Miami weather are
+not correlated. Meanwhile the thing that IS correlated — the six-contract ladder
+on one city-day — is grouped only incidentally, via the shared date.
+
+Wrong in both directions, and it caps the weather model at roughly three
+concurrent positions across the entire book.
+
+**Not changing this unilaterally.** It is the risk layer, and the fix loosens an
+effective constraint. Proposal for approval:
+
+- cluster key = `parts[0] + "-" + parts[1]` for non-MVE tickers, so a city-day
+  ladder clusters and two cities do not. Keep `parts[1]` for MVE tickers, which
+  is the case the function was written for.
+- Assert the four hard limits still hold afterwards: quarter-Kelly, 3% per
+  trade, 25% total exposure, 20% drawdown breaker. The cluster cap is the only
+  number that moves.
+- Test that a six-contract NYC ladder still shares one cluster, that NYC and
+  Miami do not, and that an MVE parlay's legs still share theirs — each
+  demonstrated failing against the current key first.

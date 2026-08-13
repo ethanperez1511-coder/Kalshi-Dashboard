@@ -24,6 +24,7 @@ from src.trading_config import (
     ODDS_TTL_MINUTES_OVERRIDE,
     PRESCREEN_BEFORE_MODELS,
 )
+from src.maintenance.expire_markets import open_market_count
 from src.models.market import Market
 from src.models.opportunity import Opportunity
 from src.models.price import PriceSnapshot
@@ -84,14 +85,13 @@ def score_all_markets(
     # skipped anyway, so the cutoff is applied in SQL rather than in Python —
     # which also collapses the row count the loop has to walk.
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=MAX_SNAPSHOT_AGE_MINUTES)
+    # Counted separately because the join below silently drops markets with no
+    # fresh snapshot, and "the feed stopped" and "nothing is scorable" produce
+    # the same scored count without it. Past-close markets are excluded: their
+    # status is only ever written by an ingest that no longer returns them, so
+    # counting the raw column made the denominator grow without bound.
+    funnel.open_markets = open_market_count(engine)
     with get_session(engine) as session:
-        # Counted separately because the join below silently drops markets with
-        # no fresh snapshot, and "the feed stopped" and "nothing is scorable"
-        # produce the same scored count without it.
-        funnel.open_markets = session.execute(
-            select(func.count()).select_from(Market)
-            .where(Market.status.in_(["open", "active"]))
-        ).scalar_one()
         newest = (
             select(
                 PriceSnapshot.market_id.label("market_id"),
