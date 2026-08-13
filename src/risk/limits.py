@@ -20,18 +20,41 @@ class LimitsResult:
     violations: List[str] = field(default_factory=list)
 
 
+# MVE tickers name their event in the middle segment, so that segment alone is
+# the correlated group. Every other ticker's middle segment is a date.
+_MVE_PREFIX = "KXMVE"
+
+
 def _extract_cluster_key(market_id: str) -> str:
     """Extract a cluster key from a Kalshi market ID.
 
-    For MVE tickers like KXMVESPORTSMULTIGAMEEXTENDED-S2026XXXX-YYYY,
-    the middle segment (S2026XXXX) represents the event/collection,
-    which groups correlated legs. We use this as the cluster key.
-    For non-MVE tickers, fall back to the full market_id.
+    For MVE tickers like KXMVESPORTSMULTIGAMEEXTENDED-S2026XXXX-YYYY the middle
+    segment is the event/collection and groups the correlated legs, so it is
+    the key on its own.
+
+    For everything else the middle segment is a DATE, and using it alone was
+    wrong in both directions. Measured:
+
+        KXHIGHNY-26AUG13-T92   -> '26AUG13'
+        KXHIGHAUS-26AUG13-T99  -> '26AUG13'
+        KXHIGHMIA-26AUG13-T88  -> '26AUG13'
+
+    Every temperature contract on one date shared a cluster across all seven
+    cities under a single 10%-of-bankroll cap — New York and Miami weather are
+    not correlated — while the thing that genuinely is correlated, the ladder of
+    strikes on one city-day, was grouped only incidentally through the shared
+    date. Series plus date is the correlated unit: one station, one day, one
+    outcome that every strike on the ladder reads off.
+
+    The previous docstring claimed a fall back to the full market_id; the code
+    never did that.
     """
     parts = market_id.split("-")
-    if len(parts) >= 2:
-        return parts[1]  # The event/collection ID
-    return market_id
+    if len(parts) < 2:
+        return market_id
+    if parts[0].startswith(_MVE_PREFIX):
+        return parts[1]          # the event/collection
+    return f"{parts[0]}-{parts[1]}"   # series + date = one correlated outcome
 
 
 class LimitsChecker:

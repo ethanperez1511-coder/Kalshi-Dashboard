@@ -272,6 +272,10 @@ def score_all_markets(
             "p_model": model_result.p_model,
             "implied_prob": ev_result.implied_prob,
             "edge": ev_result.edge,
+            # The gated quantity, carried through to the trade row. `edge` is
+            # the YES-side edge on every opportunity including NO calls.
+            "traded_edge": ev_result.best_edge,
+            "evaluated_price": ev_result.best_fill_cents,
             "net_ev": ev_result.net_ev,
             "recommended_side": ev_result.recommended_side,
             "confidence": model_result.confidence,
@@ -333,6 +337,7 @@ def _opportunity_row(
     """Plain values for one Opportunity row. Writes nothing."""
     return {
         "market_id": market_id,
+        "traded_edge": ev_result.best_edge,
         "p_model": ev_result.p_model,
         "implied_prob": ev_result.implied_prob,
         "edge": ev_result.best_edge,

@@ -400,3 +400,48 @@ var, and raising the heartbeat — the obvious move for keeping the database
 inside a free-tier quota — would make every market with a steady price
 permanently unscorable, with a smaller scored count as the only symptom. The
 ordering is now an assertion, not a coincidence.
+
+## L23 — Check both sides of a symmetric formula against a simulation, not against each other.
+
+`raw_ev_yes = p*(1-price) - (1-p)*price` was right. `raw_ev_no` had the win and
+loss amounts swapped, reducing to `price_no - p`, which is not an expected
+value at all. It reported **+0.50** on a bet whose true EV is **−0.10**, and
+the error grew with how expensive NO was — so it manufactured enormous fake EV
+on exactly the cheap-YES longshot fades this system trades, and dragged
+`recommended_side` to NO along with it. The `best_ev > 0` gate therefore never
+bound on that entire trade class.
+
+It survived a full test suite because every test compared the code to itself.
+Four hundred thousand simulated coin flips found it in one line. **For anything
+that claims to be an expected value, a probability, or a price, the test is a
+simulation or a closed form derived independently — never the implementation
+re-expressed.**
+
+The tell was available for free: with zero fees, EV must equal edge. The YES
+side satisfied that identity and the NO side did not. **When two paths are
+supposed to be symmetric, assert the symmetry.**
+
+## L24 — The price that justifies a trade must be the price the trade costs.
+
+The EV was computed at `100 - last_price` (91c) because `ORDER_TYPE` defaults
+to "maker" and the calculator ignored the book in that mode. The fill was taken
+at `100 - yes_bid` (92c) because paper fills are deliberately conservative.
+Both defensible alone. One cent apart, and the NO edge is +0.0329 at 91c and
++0.0229 at 92c — either side of the 0.03 threshold it was gated on. The trade
+existed only in the gap between two answers to "what does this cost".
+
+Two implementations of one question will diverge; the only fix is one
+implementation. `src/ev/fills.py` is now the single source, evaluation and
+execution both call it, and a trade whose fill differs from its evaluated price
+is refused rather than reconciled.
+
+Corollary: **last trade price is not a price.** It is what somebody else paid
+at some earlier moment. Where a book exists, the book is the price.
+
+## L25 — Store the number that was compared, not a number it can be derived from.
+
+`edge` holds the YES-side edge on every row including NO trades, so the stored
+figure on trade 1/50 (-0.0329) was neither what the gate compared (+0.0329) nor
+what the trade was worth at its fill (+0.0229). Answering "why did this pass"
+took solving backwards for the bid, the ask and the last price. An autopsy
+should be a lookup. `traded_edge` and `evaluated_price` are now persisted.

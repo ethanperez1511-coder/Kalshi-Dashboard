@@ -314,6 +314,8 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
             yes_bid=opp.get("yes_bid", 0),
             yes_ask=opp.get("yes_ask", 0),
             model_name=opp.get("model_name", ""),
+            traded_edge=opp.get("traded_edge"),
+            evaluated_price=opp.get("evaluated_price"),
         )
 
         if not result:

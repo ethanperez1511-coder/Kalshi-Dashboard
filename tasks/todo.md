@@ -711,3 +711,37 @@ effective constraint. Proposal for approval:
 - Test that a six-contract NYC ladder still shares one cluster, that NYC and
   Miami do not, and that an MVE parlay's legs still share theirs — each
   demonstrated failing against the current key first.
+
+## Trade 1/50 autopsy — three findings, in severity order (2026-08-13)
+
+Stored: `KXHIGHCHI-26AUG13-T76 | WeatherModel | NO | qty 3 | price 92 |
+p_model 0.0571 | edge -0.0329`. Every number below reproduces exactly by
+re-running the real gate code on inputs solved from the stored row:
+`last_price=9, yes_bid=8, yes_ask=9, confidence=0.85`.
+
+- [x] **F1. `no_ev` is computed with the win and loss amounts swapped.**
+  `raw_ev_no = (1-p)*price_no - p*(1-price_no)`, which algebraically equals
+  `price_no - p`. Correct is `(1-p)*(1-price_no) - p*price_no`, i.e.
+  `(1-p) - price_no`, which is exactly `no_edge` — the same identity the YES
+  side already satisfies. Verified against 400k-trial Monte Carlo: at p=0.30
+  with NO at 80c the true EV is -0.10 and the code reports +0.50. The error
+  grows with how expensive NO is, so it systematically manufactures enormous
+  fake EV on precisely the cheap-YES longshot fades this system trades, and
+  drags `recommended_side` to NO with it. Gate 1 (`best_ev <= 0`) therefore
+  never bound on this trade class.
+- [x] **F2. The EV is evaluated at a different price than the fill.**
+  `ORDER_TYPE` defaults to `"maker"`, so `calculate_ev` ignores bid/ask and
+  prices NO at `100 - last_price` = 91c. `_compute_fill_price` with
+  `PAPER_CONSERVATIVE_FILLS` fills at `100 - yes_bid` = 92c. One cent, and it
+  flipped the decision: NO edge is +0.0329 at 91c (passes the 0.03 tier) and
+  +0.0229 at 92c (fails it). Fixed by giving evaluation and execution one
+  shared fill-price function so they cannot diverge again.
+- [x] **F3. The stored edge is not the edge that was gated.**
+  `edge` stores `edge_yes` (-0.0329); the filter gates `best_edge`, the
+  recommended side's edge (+0.0329). Both are now stored, plus the fill price
+  the EV was computed against, so an autopsy is a lookup.
+
+Not a bug, but a design mismatch to rule on: `_get_edge_threshold` returns
+**0.03** at confidence >= 0.7, 0.05 for 0.4-0.7, 0.08 below. The 5% floor is
+the middle tier, not the high-confidence one. Trade 1/50 passed on the 0.03
+tier by 0.0029.

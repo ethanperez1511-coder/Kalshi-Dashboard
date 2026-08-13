@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 from sqlalchemy import Engine
 from src.database import get_session
+from src.ev.fills import fill_prices
 from src.models.trade import Trade
 from src.models.position import Position
 from src.models.settings import TradingSettings
@@ -115,31 +116,19 @@ class TradeEngine:
 
     def _compute_fill_price(
         self, decision: TradeDecision, yes_bid: int = 0, yes_ask: int = 0,
-        is_paper: bool = False,
+        is_paper: bool = True,
     ) -> int:
-        """Compute realistic fill price based on order type.
+        """What this trade costs, from the same function that priced its EV.
 
-        Taker: crosses spread (buy at ask, sell at bid).
-        Maker: posts limit inside spread (bid+1 for buys).
-        Paper with PAPER_CONSERVATIVE_FILLS: always taker pricing, since a real
-        maker order at bid+1 may never fill — keeps paper PnL pessimistic.
+        These were two separate implementations and they disagreed by a cent —
+        the EV was computed at 100 - last_price and the fill taken at
+        100 - yes_bid. See src/ev/fills.py.
         """
-        if is_paper and PAPER_CONSERVATIVE_FILLS and yes_bid > 0 and yes_ask > 0:
-            if decision.side == "yes":
-                return yes_ask
-            else:
-                return 100 - yes_bid
-        if ORDER_TYPE == "taker" and yes_bid > 0 and yes_ask > 0:
-            if decision.side == "yes":
-                return yes_ask  # pay the ask
-            else:
-                return 100 - yes_bid  # No cost = 100 - yes_bid
-        elif ORDER_TYPE == "maker" and yes_bid > 0 and yes_ask > 0:
-            if decision.side == "yes":
-                return min(yes_bid + 1, yes_ask)  # post inside spread
-            else:
-                return max(100 - yes_ask + 1, 100 - yes_ask)  # No side
-        return decision.price_cents
+        yes_fill, no_fill = fill_prices(
+            decision.price_cents if decision.side == "yes" else 100 - decision.price_cents,
+            yes_bid, yes_ask, is_paper=is_paper,
+        )
+        return yes_fill if decision.side == "yes" else no_fill
 
     def execute(
         self,
@@ -154,6 +143,8 @@ class TradeEngine:
         yes_bid: int = 0,
         yes_ask: int = 0,
         model_name: str = "",
+        traded_edge: Optional[float] = None,
+        evaluated_price: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         if not decision.approved:
             logger.info(f"Trade rejected for {market_id}: {decision.rejection_reasons}")
@@ -177,10 +168,23 @@ class TradeEngine:
         # Compute realistic fill price (paper uses conservative taker pricing)
         fill_price = self._compute_fill_price(decision, yes_bid, yes_ask, is_paper=is_paper)
 
+        # A trade that costs a different price than the one that justified it
+        # was justified by a different trade. One cent either side of the edge
+        # threshold is the whole margin at the size of edge this system trades,
+        # so this refuses rather than reconciles.
+        if evaluated_price is not None and fill_price != evaluated_price:
+            logger.error(
+                "Refusing %s: evaluated at %dc but fills at %dc — the edge that "
+                "passed the gate is not the edge available",
+                market_id, evaluated_price, fill_price,
+            )
+            return None
+
         if is_paper:
             return self._execute_paper(
                 decision, market_id, p_model, implied_prob,
                 edge, net_ev, confidence, reasoning, fill_price, model_name,
+                traded_edge,
             )
         else:
             if self._client is None:
@@ -192,6 +196,7 @@ class TradeEngine:
                 self._execute_live(
                     decision, market_id, p_model, implied_prob,
                     edge, net_ev, confidence, reasoning, fill_price, model_name,
+                    traded_edge,
                 )
             )
 
@@ -207,6 +212,7 @@ class TradeEngine:
         reasoning: str,
         fill_price: int = 0,
         model_name: str = "",
+        traded_edge: Optional[float] = None,
     ) -> Dict[str, Any]:
         actual_price = fill_price if fill_price > 0 else decision.price_cents
         with get_session(self._engine) as session:
@@ -219,6 +225,8 @@ class TradeEngine:
                 p_model=p_model,
                 implied_prob=implied_prob,
                 edge=edge,
+                traded_edge=traded_edge,
+                evaluated_price=actual_price,
                 net_ev=net_ev,
                 position_size_dollars=decision.position_size_dollars,
                 confidence=confidence,
@@ -287,6 +295,7 @@ class TradeEngine:
         reasoning: str,
         fill_price: int = 0,
         model_name: str = "",
+        traded_edge: Optional[float] = None,
     ) -> Dict[str, Any]:
         # Limit price in the order's own side terms (maker price from
         # _compute_fill_price); fall back to the decision price.
@@ -296,6 +305,7 @@ class TradeEngine:
         trade_id = self._create_pending_trade(
             decision, market_id, p_model, implied_prob,
             edge, net_ev, confidence, reasoning, limit_price, model_name,
+            traded_edge,
         )
 
         order_id = None
@@ -379,7 +389,7 @@ class TradeEngine:
     def _create_pending_trade(
         self, decision, market_id, p_model, implied_prob,
         edge, net_ev, confidence, reasoning, limit_price: int = 0,
-        model_name: str = "",
+        model_name: str = "", traded_edge: Optional[float] = None,
     ) -> int:
         with get_session(self._engine) as session:
             trade = Trade(
@@ -391,6 +401,8 @@ class TradeEngine:
                 p_model=p_model,
                 implied_prob=implied_prob,
                 edge=edge,
+                traded_edge=traded_edge,
+                evaluated_price=limit_price if limit_price > 0 else decision.price_cents,
                 net_ev=net_ev,
                 position_size_dollars=decision.position_size_dollars,
                 confidence=confidence,

@@ -17,6 +17,11 @@ class Opportunity(Base):
     p_model: Mapped[float] = mapped_column(Float)
     implied_prob: Mapped[float] = mapped_column(Float)
     edge: Mapped[float] = mapped_column(Float)
+    # Edge on the recommended side — the quantity the filter actually gates on.
+    # `edge` is always the YES-side edge, so the two differ on every NO call.
+    traded_edge: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True, default=None,
+    )
     net_ev: Mapped[float] = mapped_column(Float)
     recommended_side: Mapped[str] = mapped_column(String(10))
     confidence: Mapped[float] = mapped_column(Float)

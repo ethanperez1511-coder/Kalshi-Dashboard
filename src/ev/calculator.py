@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from src.ev.fills import fill_prices
 from src.trading_config import ORDER_TYPE
 
 
@@ -39,6 +40,15 @@ class EVResult:
     no_ev: float         # Net EV for No side after fees
     recommended_side: str  # "yes" or "no"
     fee_rate: float
+    # The prices the numbers above were computed against. Stored on the trade
+    # so an autopsy is a lookup rather than a reconstruction.
+    yes_fill_cents: int = 0
+    no_fill_cents: int = 0
+
+    @property
+    def best_fill_cents(self) -> int:
+        """Price of the recommended side, in that side's own terms."""
+        return self.yes_fill_cents if self.recommended_side == "yes" else self.no_fill_cents
 
     @property
     def best_edge(self) -> float:
@@ -58,6 +68,7 @@ def calculate_ev(
     order_type: str = "",
     yes_bid: int = 0,
     yes_ask: int = 0,
+    is_paper: bool = True,
 ) -> EVResult:
     """Calculate expected value for both Yes and No sides of a Kalshi market.
 
@@ -82,13 +93,10 @@ def calculate_ev(
     """
     ot = order_type or ORDER_TYPE
 
-    # Determine fill prices: taker crosses spread, maker posts limit
-    if yes_bid > 0 and yes_ask > 0 and ot == "taker":
-        yes_fill = yes_ask   # taker buys at ask
-        no_fill = 100 - yes_bid   # taker buys No at 100 - bid
-    else:
-        yes_fill = price_cents
-        no_fill = 100 - price_cents
+    # One shared source of fill prices, so the price that justifies a trade and
+    # the price the trade costs cannot drift apart. They did, by one cent, and
+    # that cent was the whole margin on trade 1/50.
+    yes_fill, no_fill = fill_prices(price_cents, yes_bid, yes_ask, ot, is_paper)
 
     price_yes = yes_fill / 100.0
     price_no = no_fill / 100.0
@@ -108,8 +116,19 @@ def calculate_ev(
     net_ev_yes = raw_ev_yes - fee_yes
     edge_yes = p - price_yes
 
-    # No side: buy NO at price_no
-    raw_ev_no = (1.0 - p) * price_no - p * (1.0 - price_no)
+    # No side: buy NO at price_no. Pay price_no, receive 1 if the market
+    # resolves NO. So the win is (1 - price_no) with probability (1 - p) and
+    # the loss is price_no with probability p.
+    #
+    # This read `(1-p) * price_no - p * (1-price_no)` — the win and loss
+    # amounts swapped, which reduces to `price_no - p` and is not an expected
+    # value at all. It reported +0.50 on a trade whose true EV is -0.10, and
+    # the error grew with how expensive NO was, so it manufactured enormous
+    # fake EV on exactly the cheap-YES longshot fades this system trades and
+    # dragged `recommended_side` to NO along with it. Verified against a
+    # 400k-trial simulation; the corrected form matches to three decimals and
+    # collapses to `(1-p) - price_no`, the same identity the YES side has.
+    raw_ev_no = (1.0 - p) * (1.0 - price_no) - p * price_no
     net_ev_no = raw_ev_no - fee_no
     edge_no = (1.0 - p) - price_no
 
@@ -128,4 +147,6 @@ def calculate_ev(
         no_ev=net_ev_no,
         recommended_side=recommended_side,
         fee_rate=fee_yes,
+        yes_fill_cents=yes_fill,
+        no_fill_cents=no_fill,
     )

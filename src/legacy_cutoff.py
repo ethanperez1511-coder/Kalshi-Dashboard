@@ -54,6 +54,40 @@ def mark_legacy_trades(engine: Engine) -> int:
     return count
 
 
+def mark_legacy_by_sha(engine: Engine, shas: List[str]) -> int:
+    """Retire trades placed by named deploys. Idempotent. Returns the count.
+
+    The missing-SHA rule above catches rows that predate deploy tracking. This
+    catches the other case: a deploy that tracked itself correctly and was
+    still wrong. Trade 1/50 was placed by e807f8dd, whose NO-side expected
+    value was computed with the win and loss amounts swapped — it reported
+    +0.85 on a bet worth +0.03 and chose the side on that basis. That is not
+    evidence about the system that would go live, which is the only thing the
+    50-trade gate is measuring.
+
+    Prefixes match, so an 8-character SHA from the deployment line is enough.
+    Rows are kept; only their standing changes.
+    """
+    if not shas:
+        return 0
+    prefixes = tuple(s.strip() for s in shas if s.strip())
+    if not prefixes:
+        return 0
+    with get_session(engine) as session:
+        rows = session.query(Trade).filter(Trade.is_legacy.is_(False)).all()
+        marked = [r for r in rows if (r.deploy_sha or "").startswith(prefixes)]
+        for row in marked:
+            row.is_legacy = True
+        session.commit()
+        count = len(marked)
+    if count:
+        logger.info(
+            "Marked %d trades legacy by deploy SHA %s: excluded from the gate "
+            "and from calibration", count, ", ".join(prefixes),
+        )
+    return count
+
+
 def gate_count(engine: Engine) -> int:
     """Paper trades that count toward the 50-trade gate."""
     with get_session(engine) as session:

@@ -22,6 +22,18 @@ class Trade(Base):
     implied_prob: Mapped[float] = mapped_column(Float)
     edge: Mapped[float] = mapped_column(Float)
     net_ev: Mapped[float] = mapped_column(Float)
+    # The edge on the side actually traded, and the price the EV was computed
+    # against. `edge` above is the YES-side edge whatever the trade — so for a
+    # NO trade the stored number is neither the one that was gated nor the one
+    # that was traded, and reconstructing it from the row was arithmetic on
+    # assumptions. Nullable: rows written before this existed have no honest
+    # value and must not be given a fabricated one.
+    traded_edge: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True, default=None,
+    )
+    evaluated_price: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, default=None,
+    )
     position_size_dollars: Mapped[float] = mapped_column(Float)
     confidence: Mapped[float] = mapped_column(Float)
     reasoning: Mapped[str] = mapped_column(Text)
