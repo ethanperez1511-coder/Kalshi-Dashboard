@@ -60,10 +60,35 @@ class TradeFilter:
         self.max_hours_to_expiry = max_hours_to_expiry
 
     def _get_edge_threshold(self, confidence: float) -> float:
-        """Return the minimum required edge based on model confidence.
+        """Minimum edge required, descending with model confidence.
 
-        Higher confidence allows us to act on smaller edges; lower confidence
-        demands a larger margin of safety.
+            confidence >= 0.70  ->  3%
+            0.40 <= c  < 0.70   ->  5%
+            confidence <  0.40  ->  8%
+
+        NAMED DECISION, ruled 2026-08-14, keep as coded.
+
+        Rationale: the threshold is a margin of safety against the model being
+        wrong, so it should scale with how wrong the model is expected to be.
+        Confidence here is not a marketing number — WeatherModel derives it
+        from the measured held-out Brier skill of that specific (station, lead)
+        cell, and the price-derived tier is gated off entirely. A cell with
+        demonstrated skill needs less cushion than one without, and demanding
+        the same 8% from both would discard the calibration work that earns the
+        distinction.
+
+        Recorded because it surprised a reader who expected a flat 5% floor:
+        5% is the MIDDLE tier here, not the high-confidence one. Paper trade
+        1/50 cleared the 3% tier at +0.0329 (and fails now, at its true fill
+        price, on +0.0229). The whole settled record so far ran under this
+        ladder, so changing it retroactively would also invalidate the
+        calibration evidence collected under it.
+
+        On the Phase 4 sweep list as a first-class experiment parameter. The
+        evidence that would revisit it: losses concentrating in the 3% tier —
+        which is answerable now that `traded_edge` is stored per trade, so the
+        realized PnL of trades gated at 3% can be read off directly rather than
+        reconstructed.
         """
         if confidence >= 0.7:
             return 0.03

@@ -445,3 +445,29 @@ figure on trade 1/50 (-0.0329) was neither what the gate compared (+0.0329) nor
 what the trade was worth at its fill (+0.0229). Answering "why did this pass"
 took solving backwards for the bid, the ask and the last price. An autopsy
 should be a lookup. `traded_edge` and `evaluated_price` are now persisted.
+
+
+## L26 — Every derived financial quantity needs a closed-form identity test against an independent expression.
+
+Promoted to a rule after L23, because self-comparison is the failure mode and
+it is invisible from inside the test suite: 721 tests passed against an
+expected-value formula that reported +0.50 on a bet worth -0.10, because every
+one of them computed the expectation the same wrong way the code did.
+
+The rule: for anything claiming to be an expected value, a probability, a
+price, a fee, a PnL or a position size, at least one test must compare it to a
+quantity derived **independently of the implementation** —
+
+- a closed form written out by hand from the definition,
+- a simulation (400k trials found the NO-side bug in one line),
+- an algebraic identity that must hold (zero-fee EV == edge; both sides of a
+  binary market summing to one; a round trip netting to gross minus fees),
+- or a worked example computed by a human and pinned as a literal.
+
+Re-expressing the implementation in the test proves only that it was
+transcribed correctly. **A test that would pass against the wrong formula is
+not a test of the formula.**
+
+The corollary that caught this one: where two paths are meant to be symmetric,
+assert the symmetry directly. The YES side satisfied `EV == edge` at zero fees
+and the NO side did not, and that one line was the entire bug.

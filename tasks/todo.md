@@ -745,3 +745,12 @@ Not a bug, but a design mismatch to rule on: `_get_edge_threshold` returns
 **0.03** at confidence >= 0.7, 0.05 for 0.4-0.7, 0.08 below. The 5% floor is
 the middle tier, not the high-confidence one. Trade 1/50 passed on the 0.03
 tier by 0.0029.
+
+
+## Phase 4 sweep list — first-class experiment parameters
+
+- **Edge-threshold ladder** (`TradeFilter._get_edge_threshold`): 3% / 5% / 8%
+  descending with confidence. Ruled 2026-08-14 to keep as coded; it is now a
+  named decision with its rationale at the definition. Sweep it as a parameter,
+  not as a bugfix. Revisit condition: realized losses concentrating in the 3%
+  tier. Readable directly from `trades.traded_edge` — no reconstruction needed.
