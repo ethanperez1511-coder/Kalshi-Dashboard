@@ -1018,3 +1018,79 @@ P1 root cause, P2 and P3 all wait on production numbers. Needed:
    reason this one vanished is still unexplained. Still worth a look at that
    run's "Alert on failure" step.
 3. The `WeatherModel refusals:` line from any recent trade.yml cycle log.
+
+
+---
+
+# Storage emergency: parlay mint (2026-08-17)
+
+## Census findings (operator-supplied)
+376k open markets, of which 218k KXMVECROSSCATEGORY + 156k
+KXMVESPORTSMULTIGAMEEXTENDED = 374k. 123k new rows on 08-15 alone. Scorer
+reaches 2,270. ~60 MB/day against 126 MB headroom = ~2 days to the cap.
+Recorder liveness: 194 dead of 253,261 (~0%) — 56h live coverage stands.
+
+## Safety statement (per CLAUDE.md)
+- Nothing here touches `mode`, `paper_trading_mode` or `can_trade_live`.
+- Risk limits untouched: quarter-Kelly, 3%/trade, 25% exposure, 20% breaker.
+- The ingest filter can only REDUCE what is persisted. The seven weather series
+  are asserted by test never to match an exclusion.
+- The purge never touches a market with an open position or an opportunity
+  inside the recorder's recency window — the constraint carried over from the
+  recorder fix. Positions, trades and opportunities are never deleted by it.
+- Deletion is limited to market rows with zero dependent rows in ALL of
+  price_snapshots, trades, positions, opportunities, orderbook_delta_raw.
+
+## Tasks
+- [x] 1a. Ingest exclusion, config-driven (`TRADING_EXCLUDED_SERIES`), applied
+      before sync_markets AND record_price_snapshots, counted on the funnel.
+- [x] 1a+. Concentration detector for the NEXT firehose: any series over 25% of
+      one fetch is logged with its share.
+- [x] 1b. `--purge-markets` maintenance action, dry-run + PURGE-ORPHAN-MARKETS
+      token, batched deletes, VACUUM FULL, measured reclaim estimate.
+- [x] 1c. DB growth rate (MB/day trailing 7d) + days-to-full in the daily digest.
+- [x] Read-only `day7` dispatch so the coverage question is answerable in prod.
+- [ ] OPERATOR: dispatch purge dry run, read it, then re-run with the token.
+- [ ] Re-check the growth line after the purge — it should go negative once,
+      then flatten near zero if the ingest filter is working.
+
+## Expected space reclaimed — estimate, and how it was derived
+No per-table byte figures were available (the census output did not come
+through in the message), so this is derived from the operator's own numbers and
+should be treated as an estimate the dry run will replace with a measurement.
+
+  60 MB/day / 123,000 new rows on 08-15  ~=  490 bytes per market row all-in
+  374,000 parlay rows x ~490 bytes       ~=  180 MB
+
+So roughly **150-250 MB**, i.e. about half the database, taking usage from
+~386 MB to ~200 MB and headroom from 126 MB to ~310 MB. The plan reports the
+exact figure before anything is deleted: it reads the real average `markets`
+row width from `pg_total_relation_size` and multiplies by the deletable count.
+
+Caveat worth stating: DELETE alone does not return space to the tier — it marks
+pages reusable, which stops growth but leaves `pg_database_size` where it was.
+The reclaim above requires the VACUUM FULL that execution runs, and that takes
+an ACCESS EXCLUSIVE lock on `markets` for its duration. A five-minute trading
+cycle overlapping it will block or lose one tick.
+
+## Day-7: what it needs per category, from here
+Thresholds are in `src/execution/day7.py` and none of them changed:
+
+- **24 live recorded hours per category** (MIN_HOURS_TO_PROJECT) before ANY N is
+  emitted. Below it the report prints "too little to project from" rather than a
+  number, deliberately.
+- **200 trade prints per category** (MIN_PRINTS_TO_MEASURE) before the
+  multi-level rate is MEASURED. Below it the report carries 0.10 from the probe
+  and labels it CARRIED — the probe was taken on liquid markets and is a poor
+  guide to weather.
+- **200 recognised fills** (TARGET_RECOGNISED_FILLS) before capture is more than
+  noise at 1-3 cent spreads. days_to_sample = 200 / (prints_per_hour x 24 x rate).
+
+56h live is pooled; the gate is per category and never pooled. Sports may well
+clear 24h while weather does not, and that finding stands on its own — maker
+stays off for weather in that case. The `day7` dispatch answers it directly.
+
+## Review
+Ingest filter: 14 tests. Purge: 16 tests, TDD. Growth: 8 tests including a
+reproduction of the measured emergency (60 MB/day vs 126 MB -> ~2.1 days).
+Full suite 874 passed, 2 deselected.
