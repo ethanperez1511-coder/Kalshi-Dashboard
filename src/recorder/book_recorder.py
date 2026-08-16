@@ -21,13 +21,16 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, and_, select
 
 from src.database import get_session
 from src.kalshi.auth import KalshiAuth
+from src.maintenance.expire_markets import OPEN_STATUSES
+from src.models.market import Market
 from src.models.opportunity import Opportunity
 from src.models.orderbook_raw import OrderbookDeltaRaw, OrderbookGap
 from src.models.position import Position
@@ -50,6 +53,17 @@ RECONNECT_BASE_DELAY = 2.0
 RECONNECT_MAX_DELAY = 60.0
 FLUSH_EVERY = 200
 
+# A write that fails is retried this many times before the batch is abandoned.
+# Bounded on purpose: the alternative to dropping a batch is holding the socket
+# hostage to a database that may be down for the rest of the hour.
+WRITE_ATTEMPTS = 3
+RETRY_SLEEP = 0.5
+
+# Opportunity rows are written every cycle and never invalidated, so without a
+# recency bound the subscribe list is every market ever scored. Six hours is
+# many cycles of slack while still guaranteeing the list refreshes each run.
+RECENT_OPPORTUNITY_HOURS = 6
+
 
 @dataclass
 class RecorderStats:
@@ -57,32 +71,71 @@ class RecorderStats:
     written: int = 0
     gaps: int = 0
     reconnects: int = 0
+    # A batch the database refused after every retry. Losing a batch is
+    # survivable; losing it silently is the bug this counter exists to prevent.
+    write_failures: int = 0
+    messages_lost: int = 0
     markets: List[str] = field(default_factory=list)
 
     def summary(self) -> str:
-        return (
+        line = (
             f"book recorder: {self.written} messages written across "
             f"{len(self.markets)} markets, {self.gaps} sequence gaps, "
             f"{self.reconnects} reconnects"
         )
+        if self.write_failures:
+            line += (
+                f", {self.write_failures} failed writes losing "
+                f"{self.messages_lost} messages"
+            )
+        return line
 
 
-def markets_to_record(engine: Engine, limit: int = MAX_MARKETS) -> List[str]:
-    """Markets worth recording: anything we hold, plus anything we are scoring.
+def markets_to_record(
+    engine: Engine, limit: int = MAX_MARKETS, now: Optional[dt.datetime] = None,
+) -> List[str]:
+    """Live markets worth recording: anything we hold, plus anything we score.
 
     Open positions come first and are never dropped by the cap — a market we
     are actually exposed to matters more than one we are merely watching.
+
+    Every candidate must be a market that is still open, joined to its `markets`
+    row rather than trusted from the opportunity. Measured 2026-08-16: the
+    recorder spent an hour subscribed to KXHIGH*-26AUG13 contracts that had
+    settled three days earlier, because Opportunity rows are never invalidated
+    and nothing here checked. Those hours are worse than wasted — they inflate
+    the day-7 coverage clock with intervals containing no live market.
+
+    A candidate with no `markets` row is dropped rather than recorded. Unknown
+    liveness is not a licence: those subscriptions are where the blank-ticker
+    rows in the raw table came from.
     """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    live = and_(
+        Market.status.in_(OPEN_STATUSES),
+        Market.close_date.isnot(None),
+        Market.close_date > now,
+    )
+
     with get_session(engine) as session:
         held = [
             row[0] for row in session.execute(
-                select(Position.market_id).where(Position.status == "open").distinct()
+                select(Position.market_id)
+                .join(Market, Market.market_id == Position.market_id)
+                .where(Position.status == "open", live)
+                .distinct()
             ).all()
         ]
         scored = [
             row[0] for row in session.execute(
                 select(Opportunity.market_id)
-                .where(Opportunity.status.in_(("qualifying", "watching")))
+                .join(Market, Market.market_id == Opportunity.market_id)
+                .where(
+                    Opportunity.status.in_(("qualifying", "watching")),
+                    Opportunity.scored_at
+                    >= now - dt.timedelta(hours=RECENT_OPPORTUNITY_HOURS),
+                    live,
+                )
                 .order_by(Opportunity.net_ev.desc())
             ).all()
         ]
@@ -114,22 +167,81 @@ class BookRecorder:
 
     # -- persistence -----------------------------------------------------
 
+    def _attempt_write(self, work, description: str) -> bool:
+        """Run one write with bounded retry. True if it became durable.
+
+        Never raises. A database failure must cost at most the batch in hand:
+        the production crash was an OperationalError escaping `_flush`, being
+        caught by the reconnect handler, which called `_flush` again, which
+        raised again — outside the try — and ended a 55-minute recording hour
+        that cannot be backfilled.
+
+        The pool is disposed between attempts because the failure mode is a
+        connection Neon closed while it sat idle. Retrying with the same dead
+        connection just fails identically three times.
+        """
+        for attempt in range(1, WRITE_ATTEMPTS + 1):
+            try:
+                with get_session(self._engine) as session:
+                    work(session)
+                return True
+            except Exception as exc:
+                logger.warning(
+                    "%s failed (attempt %d/%d): %s",
+                    description, attempt, WRITE_ATTEMPTS, exc,
+                )
+                try:
+                    self._engine.dispose()
+                except Exception:  # pragma: no cover - dispose is best effort
+                    logger.debug("Engine dispose failed", exc_info=True)
+                if attempt < WRITE_ATTEMPTS:
+                    time.sleep(RETRY_SLEEP)
+        return False
+
     def _flush(self) -> None:
         if not self._buffer:
             return
-        rows, self._buffer = self._buffer, []
-        with get_session(self._engine) as session:
+        # The buffer is NOT cleared before the insert. It used to be, so a
+        # failed write lost the batch even in principle and there was nothing
+        # for a retry to retry.
+        rows = self._buffer
+
+        def _insert(session):
             session.bulk_insert_mappings(OrderbookDeltaRaw, rows)
-            session.commit()
-        self.stats.written += len(rows)
+
+        if self._attempt_write(_insert, f"Writing {len(rows)} book messages"):
+            self._buffer = []
+            self.stats.written += len(rows)
+            return
+
+        # Abandon the batch rather than buffer a dead hour into memory — an
+        # unbounded buffer is the resource exhaustion that killed the Railway
+        # host. The loss is counted and logged at ERROR so it reaches the run
+        # summary instead of becoming an unexplained hole in the record.
+        self._buffer = []
+        self.stats.write_failures += 1
+        self.stats.messages_lost += len(rows)
+        logger.error(
+            "DROPPED %d book messages after %d failed write attempts — this "
+            "interval cannot be reconstructed and cannot be backfilled",
+            len(rows), WRITE_ATTEMPTS,
+        )
 
     def _record_gap(self, ticker: str, sid: Optional[int], expected: int, got: int):
-        with get_session(self._engine) as session:
+        def _insert(session):
             session.add(OrderbookGap(
                 market_ticker=ticker, sid=sid, expected_seq=expected,
                 received_seq=got, missing=max(0, got - expected),
             ))
-            session.commit()
+
+        if not self._attempt_write(_insert, f"Recording sequence gap on {ticker}"):
+            # An unrecorded gap is worse than a recorded one: the replay layer
+            # would reconstruct across it believing the sequence was intact.
+            logger.error(
+                "Could not record the sequence gap on %s (expected %d, got %d) "
+                "— the book across this interval must not be trusted",
+                ticker, expected, got,
+            )
         self.stats.gaps += 1
         logger.warning(
             "Sequence gap on %s (sid=%s): expected %d, got %d — book cannot be "

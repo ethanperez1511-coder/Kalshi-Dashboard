@@ -11,12 +11,15 @@ removed (gaps recorded, snapshots kept, sequence reset on reconnect).
 """
 from __future__ import annotations
 
+import datetime as dt
+
 import asyncio
 import json
 
 import pytest
 
 from src.database import Base, get_session
+from src.models.market import Market
 from src.models.opportunity import Opportunity
 from src.models.orderbook_raw import OrderbookDeltaRaw, OrderbookGap
 from src.models.position import Position
@@ -151,8 +154,27 @@ class TestSequenceGaps:
 
 
 class TestMarketSelection:
+    """Every candidate needs a live `markets` row.
+
+    These used to seed positions and opportunities with no market row at all,
+    which production never produces — a scored or held market was ingested by
+    definition. `markets_to_record` now refuses a candidate whose liveness it
+    cannot establish, because taping settled books is what inflated the day-7
+    clock, so the fixtures are brought up to production shape.
+    """
+
+    @staticmethod
+    def _live_market(session, market_id):
+        session.add(Market(
+            market_id=market_id, title="t", category="Weather",
+            close_date=dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=2),
+            status="active",
+        ))
+
     def test_open_positions_come_first(self, engine):
         with get_session(engine) as s:
+            self._live_market(s, "HELD")
+            self._live_market(s, "SCORED")
             s.add(Position(market_id="HELD", side="yes", entry_price=50,
                            quantity=1, current_price=50, status="open"))
             s.add(Opportunity(
@@ -166,7 +188,9 @@ class TestMarketSelection:
     def test_a_held_market_survives_the_cap(self, engine):
         """Exposure matters more than watching."""
         with get_session(engine) as s:
+            self._live_market(s, "HELD")
             for i in range(30):
+                self._live_market(s, f"S{i}")
                 s.add(Opportunity(
                     market_id=f"S{i}", p_model=0.6, implied_prob=0.5, edge=0.1,
                     net_ev=0.05 + i, recommended_side="yes", confidence=0.8,
@@ -189,6 +213,7 @@ class TestMarketSelection:
 
     def test_no_duplicates(self, engine):
         with get_session(engine) as s:
+            self._live_market(s, "BOTH")
             s.add(Position(market_id="BOTH", side="yes", entry_price=50,
                            quantity=1, current_price=50, status="open"))
             s.add(Opportunity(

@@ -263,7 +263,16 @@ class TestRecorderSubscribeList:
         from src.models.opportunity import Opportunity
         from src.recorder.book_recorder import markets_to_record
 
+        from src.models.market import Market
+
         with get_session(engine) as s:
+            # A live market row: the subscribe list refuses any candidate whose
+            # liveness it cannot establish, so production shape is required.
+            s.add(Market(
+                market_id="M-1", title="t", category="Weather",
+                close_date=dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=2),
+                status="active",
+            ))
             s.add(_opportunity("M-0", "rejected", -0.01))
             s.add(_opportunity("M-1", "watching", 0.02))
             s.commit()

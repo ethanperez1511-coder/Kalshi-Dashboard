@@ -16,7 +16,24 @@ def get_engine(database_url: str) -> Engine:
     connect_args = {}
     if database_url.startswith("sqlite"):
         connect_args["check_same_thread"] = False
-    return create_engine(database_url, connect_args=connect_args)
+        return create_engine(database_url, connect_args=connect_args)
+
+    # Neon closes idle connections server-side. The book recorder holds one
+    # pooled connection across a 55-minute window and weather books are quiet,
+    # so between two sparse flushes the connection dies and the next INSERT
+    # fails with "consuming input failed: SSL connection has been closed
+    # unexpectedly" — measured in production 2026-08-16.
+    #
+    # pre_ping spends one round-trip proving a pooled connection is alive
+    # before handing it out; recycle retires connections before an idle
+    # timeout can reach them. Both are cheap next to re-running an hour of
+    # recording that cannot be backfilled.
+    return create_engine(
+        database_url,
+        connect_args=connect_args,
+        pool_pre_ping=True,
+        pool_recycle=300,
+    )
 
 
 @contextmanager

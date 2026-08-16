@@ -29,7 +29,7 @@ from src.config import Settings
 from src.database import get_engine, get_session
 from src.models.market import Market
 from src.models.orderbook_raw import OrderbookDeltaRaw
-from src.recorder.health import recorder_health
+from src.recorder.health import is_live, recorder_health
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -65,18 +65,32 @@ def measure(engine: Engine) -> Dict[str, dict]:
                 OrderbookDeltaRaw.market_ticker,
                 OrderbookDeltaRaw.ts_ms,
                 OrderbookDeltaRaw.payload,
+                OrderbookDeltaRaw.received_at,
             ).where(OrderbookDeltaRaw.msg_type == "trade")
         ).all()
-        categories = dict(session.execute(
-            select(Market.market_id, Market.category)
-        ).all())
+        facts = {
+            market_id: (category, close_date)
+            for market_id, category, close_date in session.execute(
+                select(Market.market_id, Market.category, Market.close_date)
+            ).all()
+        }
 
     sweeps: Dict[str, Dict[tuple, set]] = defaultdict(lambda: defaultdict(set))
     prints: Dict[str, int] = defaultdict(int)
     markets: Dict[str, set] = defaultdict(set)
+    skipped_not_live = 0
 
-    for ticker, ts_ms, payload in rows:
-        category = categories.get(ticker) or "unknown"
+    for ticker, ts_ms, payload, received_at in rows:
+        category, close_date = facts.get(ticker, (None, None))
+        # A print recorded after its market closed says nothing about how often
+        # OUR markets trade through a resting level — it describes a book that
+        # no longer exists. Counting it shortens the day-7 date on a sample
+        # that cannot validate anything. Same rule as the coverage clock, from
+        # the same function, so hours and prints always describe one sample.
+        if not is_live(received_at, close_date):
+            skipped_not_live += 1
+            continue
+        category = category or "unknown"
         prints[category] += 1
         markets[category].add(ticker)
         try:
@@ -86,6 +100,12 @@ def measure(engine: Engine) -> Dict[str, dict]:
         sweeps[category][(ticker, ts_ms)].add(str(body.get("yes_price_dollars")))
 
     health = recorder_health(engine)
+    if skipped_not_live:
+        logger.warning(
+            "Excluded %d trade prints recorded after their market closed — "
+            "they are not evidence about a live book",
+            skipped_not_live,
+        )
     out: Dict[str, dict] = {}
 
     for category, count in prints.items():
