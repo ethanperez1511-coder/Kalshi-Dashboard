@@ -6,6 +6,7 @@ model that will never be created or migrated — `python -m src.migrate` would
 report "up to date" and change nothing. `load_all_models()` in database.py
 imports this package for that reason.
 """
+from src.models.db_size import DbSizeSample
 from src.models.market import Market
 from src.models.price import PriceSnapshot
 from src.models.orderbook import OrderbookSnapshot
@@ -21,6 +22,7 @@ from src.models.shadow import ShadowMakerOrder
 from src.backtest.models import BacktestRun, BacktestTrade
 
 __all__ = [
+    "DbSizeSample",
     "Market",
     "PriceSnapshot",
     "OrderbookSnapshot",
