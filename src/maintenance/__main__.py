@@ -2,6 +2,8 @@
 
     python -m src.maintenance                       # report only
     python -m src.maintenance --db-stats            # read-only DB census
+    python -m src.maintenance --purge-markets      # dry run
+    python -m src.maintenance --purge-markets --confirm PURGE-ORPHAN-MARKETS
     python -m src.maintenance --confirm CLOSE-LEGACY-POSITIONS
     python -m src.maintenance --retire-sha e807f8dd
     python -m src.maintenance --retire-sha e807f8dd --confirm RETIRE-DEPLOY-SHA
@@ -27,6 +29,12 @@ import sys
 from src.config import Settings, require_production_database
 from src.database import get_engine, verify_or_migrate
 from src.maintenance.db_stats import collect as collect_db_stats, format_report as format_db_stats
+from src.maintenance.purge_markets import (
+    CONFIRM_TOKEN as PURGE_TOKEN,
+    execute_purge,
+    format_plan as format_purge,
+    plan_purge,
+)
 from src.maintenance.legacy_positions import (
     CONFIRM_TOKEN,
     execute_closures,
@@ -58,6 +66,13 @@ def main(argv=None) -> int:
         ),
     )
     parser.add_argument(
+        "--purge-markets", action="store_true",
+        help=(
+            "Delete market rows with zero dependent data and archive the rest. "
+            f"Dry run unless --confirm {PURGE_TOKEN}"
+        ),
+    )
+    parser.add_argument(
         "--db-stats", action="store_true",
         help="Read-only census of table sizes, market statuses and growth rates.",
     )
@@ -70,6 +85,9 @@ def main(argv=None) -> int:
 
     if args.db_stats:
         return _db_stats(engine)
+
+    if args.purge_markets:
+        return _purge(engine, args.confirm.strip())
 
     shas = [s for s in (args.retire_shas or []) if s and s.strip()]
     if shas:
@@ -113,6 +131,45 @@ def _db_stats(engine) -> int:
         text[:4000],
         ok=True,
     )
+    return 0
+
+
+def _purge(engine, token: str) -> int:
+    """Reclaim the parlay graveyard. Dry run unless the token matches exactly."""
+    plan = plan_purge(engine)
+
+    if token and token != PURGE_TOKEN:
+        # A near-miss token on a destructive action is a typo, not consent.
+        # Falling back to a dry run would hand back a report the operator reads
+        # as a completed purge.
+        logger.error(
+            "Confirmation token did not match. Expected %r, got %r. "
+            "Nothing was changed.", PURGE_TOKEN, token,
+        )
+        write_summary("Purge markets: BAD CONFIRM TOKEN — nothing changed", ok=False)
+        return 2
+
+    if token in (CONFIRM_TOKEN, RETIRE_TOKEN):
+        # Neither of the other two tokens authorises deleting rows.
+        logger.error(
+            "Refusing: %r does not confirm a market purge. Use %r.",
+            token, PURGE_TOKEN,
+        )
+        write_summary("Purge markets: WRONG TOKEN for this action", ok=False)
+        return 2
+
+    executed = execute_purge(engine, plan) if token == PURGE_TOKEN else None
+    text = format_purge(plan, executed)
+    print(text)
+
+    headline = (
+        f"Purge EXECUTED: {executed['deleted']:,} deleted, "
+        f"{executed['archived']:,} archived"
+        if executed else
+        f"Purge DRY RUN: would delete {plan.deletable:,}, "
+        f"archive {plan.archivable:,}, exempt {plan.exempt:,}"
+    )
+    write_summary(headline, text[:4000], ok=True)
     return 0
 
 

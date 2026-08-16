@@ -11,6 +11,7 @@ name: maintenance
 # Two actions, two tokens, on purpose:
 #   retire_sha blank + CLOSE-LEGACY-POSITIONS -> unwind legacy positions
 #   retire_sha set   + RETIRE-DEPLOY-SHA      -> retire a deploy from the gate
+#   purge_markets    + PURGE-ORPHAN-MARKETS   -> delete dependency-free rows
 # One token for both would mean confirming either confirms both.
 #
 # db_stats is the exception and takes no token: it is SELECT-only. It is
@@ -23,12 +24,22 @@ on:
         type: boolean
         required: false
         default: false
+      day7:
+        description: "Read-only: day-7 trade-through measurement per category (live rows only). Ignores the other inputs."
+        type: boolean
+        required: false
+        default: false
+      purge_markets:
+        description: "Purge market rows with zero dependent data, archive the rest. Dry run unless confirm=PURGE-ORPHAN-MARKETS."
+        type: boolean
+        required: false
+        default: false
       retire_sha:
         description: "Deploy SHA to retire from the gate (e.g. e807f8dd). Blank = legacy-position reconcile instead."
         required: false
         default: ""
       confirm:
-        description: "CLOSE-LEGACY-POSITIONS to unwind, or RETIRE-DEPLOY-SHA to retire a deploy. Blank for a dry run."
+        description: "CLOSE-LEGACY-POSITIONS to unwind, RETIRE-DEPLOY-SHA to retire a deploy, PURGE-ORPHAN-MARKETS to purge. Blank for a dry run."
         required: false
         default: ""
 
@@ -53,6 +64,8 @@ jobs:
           KALSHI_API_KEY: ${{ secrets.KALSHI_API_KEY }}
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY_B64 }}
           DB_STATS: ${{ inputs.db_stats }}
+          DAY7: ${{ inputs.day7 }}
+          PURGE_MARKETS: ${{ inputs.purge_markets }}
           RETIRE_SHA: ${{ inputs.retire_sha }}
           CONFIRM: ${{ inputs.confirm }}
         # Inputs go through the environment, never interpolated into the shell
@@ -61,6 +74,10 @@ jobs:
         run: |
           if [ "$DB_STATS" = "true" ]; then
             python -m src.maintenance --db-stats
+          elif [ "$DAY7" = "true" ]; then
+            python -m src.execution.day7
+          elif [ "$PURGE_MARKETS" = "true" ]; then
+            python -m src.maintenance --purge-markets --confirm "$CONFIRM"
           elif [ -n "$RETIRE_SHA" ]; then
             python -m src.maintenance --retire-sha "$RETIRE_SHA" --confirm "$CONFIRM"
           else
