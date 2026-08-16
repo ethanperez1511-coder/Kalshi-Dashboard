@@ -8,6 +8,7 @@ from sqlalchemy import Engine
 
 from src.config import Settings
 from src.deadline import Deadline
+from src.ingestion.exclusions import concentration_warnings, filter_ingestable
 from src.ingestion.market_sync import sync_markets
 from src.ingestion.price_recorder import record_price_snapshots
 from src.ingestion.series_ingest import ingest_series
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 
 async def _fetch_and_sync(
     engine: Engine, settings: Settings, deadline: Deadline = None,
+    excluded: dict = None,
 ) -> int:
     deadline = deadline or Deadline.none("ingest")
     client = KalshiClient.from_settings(settings)
@@ -36,6 +38,26 @@ async def _fetch_and_sync(
             event_markets = await client.get_event_markets(max_markets=EVENT_FETCH_CAP)
             seen = {m.ticker for m in markets}
             markets.extend(m for m in event_markets if m.ticker not in seen)
+
+        # Filtered BEFORE the write, not after: an excluded market must cost
+        # neither a `markets` row nor a price snapshot. Filtering downstream of
+        # sync_markets would leave the bytes exactly where the problem is.
+        for series, count, share in concentration_warnings(markets):
+            logger.warning(
+                "Series %s is %.0f%% of this fetch (%d markets) — if it is a "
+                "parlay mint it belongs in TRADING_EXCLUDED_SERIES",
+                series, 100 * share, count,
+            )
+        markets = filter_ingestable(
+            markets, excluded if excluded is not None else {},
+        )
+        if excluded:
+            logger.info(
+                "Ingest excluded %d markets: %s",
+                sum(excluded.values()),
+                ", ".join(f"{k}={v}" for k, v in sorted(excluded.items())),
+            )
+
         sync_markets(engine, markets)
         record_price_snapshots(
             engine,
@@ -59,6 +81,7 @@ async def _fetch_and_sync(
 
 def ingest_live_markets(
     engine: Engine, settings: Settings, deadline: Deadline = None,
+    excluded: dict = None,
 ) -> int:
     try:
         loop = asyncio.get_running_loop()
@@ -70,9 +93,11 @@ def ingest_live_markets(
         # run in a new thread to avoid "cannot call asyncio.run()" error.
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as pool:
-            count = pool.submit(asyncio.run, _fetch_and_sync(engine, settings, deadline)).result()
+            count = pool.submit(
+                asyncio.run, _fetch_and_sync(engine, settings, deadline, excluded),
+            ).result()
     else:
-        count = asyncio.run(_fetch_and_sync(engine, settings, deadline))
+        count = asyncio.run(_fetch_and_sync(engine, settings, deadline, excluded))
 
     logger.info(f"Ingested {count} live markets")
     return count

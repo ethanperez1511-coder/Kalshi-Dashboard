@@ -27,6 +27,7 @@ from src.weather.archive import run_daily_archive
 from src.weather.digest import format_weather_digest, weather_digest
 from src.recorder.health import format_recorder_health, recorder_health
 from src.digest_health import record_section
+from src.db_growth import format_growth, growth, record_sample
 from src.bankroll_guard import assert_bankroll_workable
 from src.legacy_cutoff import mark_legacy_trades, resync_gate_counter
 from src.deployment_state import deployment_state, format_deployment_state
@@ -93,6 +94,9 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     # src.migrate` as its own explicit step before this.
     verify_or_migrate(engine, migrate=settings.MIGRATE_ON_BOOT, context="the trading pipeline")
 
+    # Series the ingest refuses to persist, tallied so the filter stays visible.
+    ingest_excluded: dict = {}
+
     # Seed demo data if offline, otherwise fetch live markets
     if settings.is_offline_mode:
         logger.info("Offline mode — using demo markets")
@@ -100,7 +104,9 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     else:
         logger.info("Online mode — fetching live markets from Kalshi")
         ingest_deadline = Deadline(INGEST_BUDGET_SECONDS, "ingest")
-        ingest_live_markets(engine, settings, deadline=ingest_deadline)
+        ingest_live_markets(
+            engine, settings, deadline=ingest_deadline, excluded=ingest_excluded,
+        )
         if ingest_deadline.exceeded:
             overruns.append("ingest")
     clock.mark("ingest")
@@ -182,6 +188,7 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     logger.info("=== Scoring markets ===")
     score_deadline = Deadline(SCORE_BUDGET_SECONDS, "scoring")
     funnel = ScoreFunnel()
+    funnel.ingest_excluded = ingest_excluded
     results = score_all_markets(engine, deadline=score_deadline, funnel=funnel)
     if score_deadline.exceeded:
         overruns.append("scoring")
@@ -220,6 +227,10 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
         # The heartbeat is the deadman: it exists to prove the system is alive
         # on days when nothing trades. Enriching it must never be what silences
         # it, so every added section degrades to a note rather than an exception.
+        def _sample_growth(eng):
+            record_sample(eng)
+            return growth(eng)
+
         def _section(label, build):
             try:
                 value = build()
@@ -249,6 +260,11 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
                 _section("📦 Deploy", lambda: format_deployment_state(deployment_state(engine))),
                 _section("🌡 Weather", lambda: format_weather_digest(weather_digest(engine))),
                 _section("🎙 Recorder", lambda: format_recorder_health(recorder_health(engine))),
+                # A level is not a warning: 376 MB is fine on a database that
+                # has been 370 MB for a month and an emergency on one that was
+                # 200 MB on Friday. The rate is what would have shown the
+                # parlay mint days before it became a two-day deadline.
+                _section("💾 Storage", lambda: format_growth(_sample_growth(engine))),
             ]),
         )
         TradingSettings.record_heartbeat(engine)

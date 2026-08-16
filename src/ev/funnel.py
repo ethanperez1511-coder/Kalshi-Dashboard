@@ -49,6 +49,11 @@ class ScoreFunnel:
     no_independent_model: int = 0
     # Per-model refusal reasons, for models that report them.
     model_refusals: Dict[str, Counter] = field(default_factory=dict)
+    # Markets the ingest refused to persist, per series. Outside the funnel's
+    # balance (they never became rows, so they were never open markets), but
+    # reported alongside it: a filter nobody can see is how a legitimate series
+    # gets dropped for a month without anyone noticing.
+    ingest_excluded: Dict[str, int] = field(default_factory=dict)
     # State of the metered odds feed. "SportsOddsModel produced nothing" is a
     # market fact if the feed is healthy and a source outage if it is not, and
     # the two must never be reported as the same line.
@@ -104,6 +109,16 @@ class ScoreFunnel:
                     f"  {name:<24} {self.model_attempts.get(name, 0):>6}"
                     f" -> {self.model_estimates.get(name, 0)}"
                 )
+        if self.ingest_excluded:
+            total = sum(self.ingest_excluded.values())
+            detail = ", ".join(
+                f"{k}={v}" for k, v in sorted(
+                    self.ingest_excluded.items(), key=lambda kv: -kv[1]
+                )
+            )
+            lines.append(
+                f"ingest excluded {total} markets before write: {detail}"
+            )
         if self.odds_state:
             lines.append(
                 "odds feed: "
@@ -126,4 +141,8 @@ class ScoreFunnel:
             f"no-model {self.no_model_estimate}, "
             f"gated {self.price_derived_gated}, "
             f"budget {self.budget_skipped})"
+            + (
+                f" | ingest excluded {sum(self.ingest_excluded.values())}"
+                if self.ingest_excluded else ""
+            )
         )

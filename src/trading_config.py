@@ -121,6 +121,28 @@ POLYMARKET_SCAN_LIMIT: int = _env_int("TRADING_POLYMARKET_SCAN_LIMIT", 3000)
 # --- Coverage: event-category ingest ---
 # The raw /markets feed is parlay-dominated; the events feed is the only way
 # to reach Elections/Politics/Economics markets with their true category.
+# --- Storage: series the ingest refuses to persist ---
+# Kalshi mints cross-category and multi-game parlay combinations continuously —
+# 123,000 new rows on 2026-08-15 alone, 374k of 376k "open" markets, none of
+# which any model prices. Retention cannot outrun a write rate like that, so
+# the write stops at the source. Matched on the whole series token, never as a
+# prefix: "KXHIGH" as a prefix rule would take out every weather contract.
+EXCLUDED_SERIES: str = _env_str(
+    "TRADING_EXCLUDED_SERIES",
+    "KXMVECROSSCATEGORY,KXMVESPORTSMULTIGAMEEXTENDED",
+)
+
+# Share of a single fetch one series may occupy before it is called out. The
+# generic detector for the NEXT firehose, which will not be the two above.
+SERIES_CONCENTRATION_WARN: float = _env_float("TRADING_SERIES_CONCENTRATION_WARN", 0.25)
+
+
+def excluded_series_list() -> list:
+    return [s.strip() for s in EXCLUDED_SERIES.split(",") if s.strip()]
+
+
+EXCLUDED_SERIES_LIST: list = excluded_series_list()
+
 INGEST_EVENT_CATEGORIES: bool = _env_bool("TRADING_INGEST_EVENT_CATEGORIES", True)
 EVENT_FETCH_CAP: int = _env_int("TRADING_EVENT_FETCH_CAP", 2000)
 
