@@ -500,3 +500,30 @@ inputs is five reachable branches, not one happy path.
 the tree has anything after its `__main__` guard. That check found no other
 offenders today, which is the point: it will find the next one on the day it is
 written rather than on the day it is dispatched.
+
+## L28 — Work that has to run in CI is not done until it is on the branch the dispatcher reads.
+
+I fixed the alert path, shipped a `--db-stats` maintenance action, ran 813
+tests green, wrote a review section, and asked for the maintenance workflow to
+be dispatched with the new checkbox. There was no checkbox. Nothing had been
+committed, let alone pushed, so `workflow_dispatch` was reading a version of
+maintenance.yml that had never heard of the input.
+
+Everything about the report was true and the change was still unreachable.
+
+This is the fourth appearance of the same shape — thirteen unpushed commits
+running month-old code in production, `run_pipeline`'s unassigned clock,
+`_retire` below the `__main__` guard, and now this. Each time the unit was
+correct and the path between it and production had nothing checking it.
+
+The rule: **before asking the operator to run something, verify the code is
+where the runner will look for it.** For a `workflow_dispatch` input that means
+committed AND pushed to the default branch, confirmed with
+`git log origin/main..HEAD` and `git status --short` — not "the file is saved
+and the tests pass".
+
+The corollary that generalises it: "done" is defined at the boundary the
+consumer reads from, never at the boundary I last wrote to. A test suite reads
+the working tree. Actions reads the default branch. A scheduled job reads the
+default branch on its own timer. Those are three different definitions of done
+and only the last one is production.

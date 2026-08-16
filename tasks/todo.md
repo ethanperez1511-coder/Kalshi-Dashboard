@@ -754,3 +754,267 @@ tier by 0.0029.
   named decision with its rationale at the definition. Sweep it as a parameter,
   not as a bugfix. Revisit condition: realized losses concentrating in the 3%
   tier. Readable directly from `trades.traded_edge` — no reconstruction needed.
+
+---
+
+# Weekend triage: DB bloat, settlement-source change, weather blackout, silent alerts (2026-08-16)
+
+## Status: INVESTIGATION COMPLETE for 2/3/4, BLOCKED on production data for 1.
+Phase 3 stays paused. No code changed yet.
+
+## Safety statement (per CLAUDE.md)
+- Nothing proposed here touches `mode`, `paper_trading_mode`, or `can_trade_live`.
+  Paper default preserved; the live path is not reachable by any item below.
+- Risk limits untouched: quarter-Kelly, 3%/trade, 25% exposure, 20% breaker.
+- P1 fixes DELETE rows from bookkeeping tables only (markets/snapshots). Positions,
+  trades and opportunities are never pruned by anything proposed here.
+- P2 and P3 can only REDUCE the set of markets that price. Neither can open a trade.
+- Every diagnostic run so far has been read-only: SELECT-only, GET-only.
+
+## Evidence collected 2026-08-16 (all reproducible)
+
+### P2 — settlement source: CONFIRMED CHANGED, ALL SEVEN SERIES
+`tasks/diag_rules.py` against the live API. Every series now reads
+"...according to The Weather Company", CLI code retained in the parenthetical:
+CLINYC, CLIMDW, CLIMIA, CLIDEN, CLIAUS, CLILAX, CLIPHL. Zero of seven still say
+"climatological report"; six of seven no longer contain their `rules_marker`
+(KXHIGHDEN passes only by the coincidence that "Denver" appears in both).
+
+Kalshi's own series API carries the notice, verbatim:
+> "Effective Friday, August 14th, daily temperature markets will transition
+> their settlement source from the National Weather Service (NWS) to The
+> Weather Company. The Weather Company utilizes NWS as its primary underlying
+> source, and official settlement data will be accessible at
+> https://weather.com/kalshi."
+
+Answer to (b) — the settlement NUMBER is unchanged, and this is measured, not
+assumed. The feed behind weather.com/kalshi is
+`GET https://weather.com/kalshi/api/climate/primary?date=YYYY-MM-DD` (no auth).
+Its domestic records carry `cliId`, `issueTime` and a
+`official|preliminary|no_report` status — the CLI product's own vocabulary —
+while the *international* endpoint returns `source:"TWC"` with
+`observationCount:24`. Two pipelines: a CLI parser for US stations, TWC's own
+aggregation abroad. Our seven are all on the CLI-parser path. Max/min compared
+against the live NWS CLI products for all 7 cities on 2026-08-14 and 08-15:
+**14/14 exact, zero divergence.**
+
+So the calibration chain's TARGET is intact; MOS/GHCN fits do not need
+re-validation against a different number. What is missing is any means of
+NOTICING if that ever stops being true. "Primary underlying source" is not
+"only source", and the certified rulebook (GLOBALTEMPERATURE.pdf, last modified
+2025-12-12) still names NWS as Source Agency while the market rules name TWC.
+
+Answer to (c) — **weather cells are NOT refusing because of this, and would not
+have.** The station guard is a `@pytest.mark.live` test, CI-only. Nothing in
+the scoring path reads `rules` text. `is_temperature_market` matches on TITLE,
+`is_in_scope` on the ticker->station map; both still pass. Verified live with
+`tasks/diag_terms.py`: 28 contracts parsed, 56 correctly `unsupported`
+(`between` ladders), 0 unparsed, across all 7 series. Had the real cause been
+absent, this system would have kept pricing every city with no idea the
+settlement authority had changed.
+
+### P3 — WeatherModel 68 -> 0: NOT downstream of P2
+Reproduced live: at 17:25 UTC every station returned
+`MosUnavailable: HTTP 404` for the 12Z run; at 17:32 UTC the same call returned
+`MosForecast(KNYC, 2026-08-17, lead 1, 83.0F)`. The 12Z MEX run had not yet
+landed in the IEM archive.
+
+The structural problem this exposes: `run_time_for(target, lead)` returns
+`target - lead` days at 12Z, and `lead` is computed as `target - today`. Those
+cancel — **every lead always demands TODAY's 12Z run.** Leads 2 and 3 do not
+fall back to older runs that are certainly published. So from 00:00 UTC until
+the 12Z MEX run lands (~17:30 UTC), all 7 stations x all leads refuse as
+`mos_unavailable`, which is roughly 73% of the 5-minute cycles in a day.
+
+- [ ] NOT YET CONFIRMED as the production cause: needs the `WeatherModel
+      refusals:` line from a failing cycle's funnel output. If it reads
+      `mos_unavailable=68` this is settled; if it reads `cell_...` the cause is
+      a stale/unpromoted fit and the refit job is the thing to chase.
+
+### P4 — the alert that did not fire
+`.github/workflows/live-checks.yml:43-49` has `if: failure()` and the correct
+secret names (identical to trade.yml, which does deliver). So the step ran.
+`src/alert_live_failure.py:23-32` calls `alerter.send(...)` and **discards the
+return value**, then returns 0 unconditionally. Commit 7089853 changed
+`Alerter.send` to return a delivery bool precisely so this was countable, and
+updated the high-frequency callers — it never updated this one, the
+lowest-frequency and highest-consequence caller. A disabled or refused send is
+therefore indistinguishable from a delivered one, from both Telegram and the
+Actions UI: green step, no message.
+Same file is the alert path for retention.yml, book-recorder.yml and
+weather-refit.yml — all four scheduled workflows share the defect.
+`alert_live_failure` is also absent from `TestEveryEntrypointExecutes` in
+tests/test_pipeline_entrypoint.py, so L27 applies unchanged.
+
+### P1 — DB trajectory: BLOCKED, hypotheses ranked
+Local `.env` DATABASE_URL is `sqlite:///kalshi.db`; production is a GitHub
+secret, and neither `gh` nor `psql` is installed. No production query has been
+run, so nothing below is confirmed.
+Ruled out by reading the code: `KalshiMarket.close_time` is a REQUIRED field,
+so ingest cannot write a NULL `close_date`; the `close_date IS NULL` arm of
+`open_market_count` is unreachable from ingest. `markets.market_id` carries a
+unique index and `sync_markets` dedupes within the batch, so duplicate rows per
+ticker are not the mechanism either.
+Leading hypothesis: the markets table is an unbounded graveyard. Nothing ever
+deletes a market row; retention prunes `price_snapshots`/`orderbook_deltas`
+only. Each cycle unions in whatever the capped walks return
+(MARKET_FETCH_CAP 3000 + EVENT_FETCH_CAP 2000 + SERIES_FETCH_CAP 500, every 5
+minutes), and every ticker with a far-future `close_date` counts as "open"
+forever whether or not it is tradeable. 32,074 open on 2026-08-13 (measured, in
+the expire_markets docstring) -> 328,099 today is ~100k rows/day.
+
+## Tasks
+- [x] P1.1 Read-only `db-stats` maintenance action: per-table bytes and row
+      counts, markets by status, open-count broken out by close_date horizon,
+      first-seen-per-day histogram, snapshot span. Answers this question now
+      and every future time without a local DATABASE_URL.
+- [ ] P1.2 Confirm whether retention has ever run in production (Actions history
+      + a `last_pruned_at` marker row so the answer is in the DB, not only in a
+      UI that ages out).
+- [ ] P1.3 Fix the accumulation at its root once measured. Candidate: an
+      ingest-horizon filter (do not store markets closing beyond N days — the
+      velocity limit already refuses to trade them) plus a markets retention
+      sweep for rows long past close with no position and no trade history.
+      Must not delete any market referenced by a position, trade or opportunity.
+- [ ] P2.1 Re-point the station guard: match the CLI code (`clinyc`, `climdw`,
+      ...) which identifies the observing site and is stable across vendors,
+      plus assert the named settlement source. Replace the
+      "climatological report" assertion rather than deleting it.
+- [ ] P2.2 Guard reports ALL seven series, not just the first to fail. The
+      current loop aborted on KXHIGHNY and never revealed that all seven had
+      moved — three days of failures that undercounted the blast radius by 7x.
+- [ ] P2.3 Add the real detector: a daily live check comparing
+      weather.com/kalshi `climate/primary` against the NWS CLI/GHCN value for
+      each of the 7 stations. Divergence is the event that actually matters,
+      and it is the only thing that would tell us TWC stopped being a CLI
+      passthrough. Whole-degree exact match; any mismatch fails loudly.
+- [ ] P2.4 If the TWC feed is ingested at all: hard-fail on `data: null` /
+      `no_report` (HTTP 200 with null payload) and gate on
+      `status == "official"`. Never coerce to zero. Note its history begins
+      2026-06-01, so GHCN remains the fitting truth source.
+- [ ] P2.5 Record in the code WHY the fits were not re-validated: 14/14 CLI
+      match on 2026-08-14/15, with the check that keeps proving it (P2.3).
+- [ ] P3.1 Get the production refusal counters and confirm or replace the
+      MOS-blackout diagnosis before writing a line of fix.
+- [ ] P3.2 If confirmed: use the most recent PUBLISHED 12Z run and derive
+      `lead` from that run's date, instead of demanding a run that may not
+      exist yet. Predictor stays MEX 12Z — the same product sigma was fitted
+      on — and the fit loaded is the one for the lead actually used. No
+      fallback to a different model, ever.
+- [ ] P3.3 Alert when a whole model goes to zero priced for N consecutive
+      cycles. 68 -> 0 for a weekend should not need a human to notice it.
+- [x] P4.1 `alert_live_failure` checks the send result; on non-delivery write to
+      GITHUB_STEP_SUMMARY and exit non-zero so the step goes red. The job is
+      already red, so this cannot mask the original failure — it can only stop
+      an undelivered alert from looking delivered.
+- [x] P4.2 runpy entry-point test for `src.alert_live_failure`, executed the way
+      Actions executes it, covering delivered / refused / no-credentials.
+- [ ] P4.3 Extend to the class: assert every scheduled workflow has a failure
+      alert step with `if: failure()`, so the next workflow added cannot ship
+      without one. trade.yml and maintenance.yml currently have none.
+
+## Review
+
+### P4 — landed 2026-08-16
+`src/alert_live_failure.py` now uses `send()`'s delivery bool as its exit code:
+delivered -> 0 with a run-summary line, refused/disabled -> run summary marked
+failed, message to stderr, exit 1. The step runs only under `if: failure()`, so
+the job is already red and nothing is masked; what changes is that "alerted"
+and "alerted nobody" stop looking identical.
+
+`tests/test_live_failure_alert.py`, 8 tests, TDD — 6 failed against the old
+code, all 8 pass now. Every one executes the entry point through
+`runpy.run_module(..., run_name="__main__")` with `src.alerts` patched at the
+source module (L27), including the real disabled `Alerter` with no credentials,
+which is the exact production scenario. The regression is pinned directly:
+`test_delivered_and_refused_do_not_share_an_exit_code`.
+
+### P1.1 — landed 2026-08-16
+`src/maintenance/db_stats.py` + `python -m src.maintenance --db-stats`, wired to
+a `db_stats` boolean input on maintenance.yml. SELECT-only, no confirmation
+token, and checked before every destructive branch in both the workflow and
+`main()`.
+
+`tests/test_db_stats.py`, 8 tests. The two that matter: the report imports
+`open_market_count` rather than re-deriving it, so the census and the funnel
+cannot disagree (L26); and `test_collect_writes_nothing` fingerprints row counts
+and market rows before and after.
+
+Smoke-run against a copy of the local 95 MB SQLite DB (2026-08-12 vintage,
+predates expire_markets):
+
+    open markets (funnel) : 1978
+    open status past close: 132925
+    scorer can reach      : 0   (snapshot < 30min)
+    open by close horizon : <=7d 0 | 8-30d 2 | 31-90d 6 | >90d 1970
+    top open prefixes     : KXGDPYEAR 56, KXTRUMPPARDONS 52, KXPERFORMROLE007 50...
+
+1,970 of 1,978 "open" markets close beyond 90 days, against a 14-day velocity
+limit — none of them is ever tradeable. That is the graveyard hypothesis showing
+its shape on real data, though on a stale local DB rather than production.
+
+Full suite: 813 passed, 2 deselected (live).
+
+### Recorder triage — landed 2026-08-16 (both bugs)
+
+**R1. SSL death no longer costs the hour.** Three compounding defects, all fixed:
+`get_engine` now sets `pool_pre_ping=True` and `pool_recycle=300` for non-SQLite
+URLs, so a connection Neon closed while idle is proved dead and replaced before
+it is handed out. `_flush` no longer clears the buffer before the insert — it
+used to, so a failed write lost the batch even in principle and a retry had
+nothing to retry. Writes go through `_attempt_write`, which retries
+WRITE_ATTEMPTS=3 times, disposes the pool between attempts (retrying with the
+same dead connection just fails identically), and NEVER raises. That last part
+is the actual crash: the OperationalError escaped `_flush`, the reconnect
+handler caught it and called `_flush` again, and the second raise was outside
+the try and ended a 55-minute unbackfillable recording window.
+A batch abandoned after all retries is counted (`write_failures`,
+`messages_lost`) and logged at ERROR into the run summary — losing a batch is
+survivable, losing it silently is not.
+
+**R2. The subscribe list can no longer contain corpses.** `markets_to_record`
+now joins `markets`, requires status in OPEN_STATUSES and `close_date > now`,
+and bounds opportunities to the last RECENT_OPPORTUNITY_HOURS=6 so the list
+refreshes per run instead of accumulating every market ever scored. A candidate
+with no `markets` row is dropped: unknown liveness is not a licence, and those
+subscriptions are where the blank-ticker rows came from. Held positions still
+sort first among live markets, but a position in a closed market is not
+recorded — there is no book on a settled market, and settlement reads the
+exchange, never this feed.
+
+**R3. The day-7 clock now counts live hours only.** `is_live(received_at,
+close_date)` is defined once in `src/recorder/health.py` and used by BOTH
+`recorder_health` (coverage hours) and `day7.measure` (trade prints), so the
+hours and the prints can never describe different samples. Every recorded row
+classifies as live / dead / unattributed; the buckets are asserted to sum to
+the total. Dead rows are reported, never deleted — their share IS the answer to
+how much of the record was real.
+
+Tests: 13 in test_recorder_resilience.py, 8 in test_recorder_liveness.py, 2
+added to test_db_stats.py. TDD throughout — 13 and 6 failed first respectively.
+Full suite 836 passed.
+
+Four pre-existing tests updated, deliberately: TestMarketSelection (x3) and
+TestRecorderSubscribeList (x1) seeded positions and opportunities with NO
+`markets` row, which production never produces — a scored or held market was
+ingested by definition. They encoded the old permissive behaviour, not a
+requirement. Fixtures brought to production shape; the assertions are unchanged.
+
+**Constraint this places on the graveyard fix (P1.3):** archival must never
+remove a `markets` row for a market with an open position or an opportunity
+inside the recency window, or the recorder goes blind on exactly the markets it
+most needs to tape. Archive, never delete — as instructed.
+
+### Still open
+P1 root cause, P2 and P3 all wait on production numbers. Needed:
+1. maintenance workflow dispatched with `db_stats: true`. NOW PUSHED (see L28 —
+   it was never committed, which is why the checkbox did not exist). The census
+   now also carries the recorder live/dead/unattributed split, so one dispatch
+   answers both the storage question and the day-7 coverage question.
+2. Retention: ANSWERED — 4/4 green, working. Telegram: ANSWERED — trade alerts
+   arrive, so the token is valid, which makes the missing live-checks alert
+   MORE puzzling, not less: same secret names, `if: failure()` present, working
+   channel. The fix makes the next one self-reporting either way, but the
+   reason this one vanished is still unexplained. Still worth a look at that
+   run's "Alert on failure" step.
+3. The `WeatherModel refusals:` line from any recent trade.yml cycle log.

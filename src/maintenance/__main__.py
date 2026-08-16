@@ -1,12 +1,17 @@
 """Maintenance entrypoint. Dry-run by default; executes only on an exact token.
 
     python -m src.maintenance                       # report only
+    python -m src.maintenance --db-stats            # read-only DB census
     python -m src.maintenance --confirm CLOSE-LEGACY-POSITIONS
     python -m src.maintenance --retire-sha e807f8dd
     python -m src.maintenance --retire-sha e807f8dd --confirm RETIRE-DEPLOY-SHA
 
-The two actions have separate confirmation tokens on purpose. One token for two
-destructive operations means confirming either confirms both.
+The two destructive actions have separate confirmation tokens on purpose. One
+token for two destructive operations means confirming either confirms both.
+
+`--db-stats` takes no token because it cannot change anything. Requiring one to
+read the size of a database that is filling up would only guarantee nobody runs
+it while it matters.
 
 Dispatched from Actions because Neon is only reachable there. Default is
 report-only on purpose: a maintenance job that can close positions by being run
@@ -21,6 +26,7 @@ import sys
 
 from src.config import Settings, require_production_database
 from src.database import get_engine, verify_or_migrate
+from src.maintenance.db_stats import collect as collect_db_stats, format_report as format_db_stats
 from src.maintenance.legacy_positions import (
     CONFIRM_TOKEN,
     execute_closures,
@@ -51,12 +57,19 @@ def main(argv=None) -> int:
             f"the gate and from calibration. Confirm token: {RETIRE_TOKEN}"
         ),
     )
+    parser.add_argument(
+        "--db-stats", action="store_true",
+        help="Read-only census of table sizes, market statuses and growth rates.",
+    )
     args = parser.parse_args(argv)
 
     settings = Settings()
     require_production_database(settings.DATABASE_URL)
     engine = get_engine(settings.DATABASE_URL)
     verify_or_migrate(engine, migrate=settings.MIGRATE_ON_BOOT, context="maintenance")
+
+    if args.db_stats:
+        return _db_stats(engine)
 
     shas = [s for s in (args.retire_shas or []) if s and s.strip()]
     if shas:
@@ -88,6 +101,20 @@ def main(argv=None) -> int:
     )
     write_summary(headline, text[:4000], ok=True)
     return 0
+
+def _db_stats(engine) -> int:
+    """Print the census and put it on the Actions summary. Changes nothing."""
+    stats = collect_db_stats(engine)
+    text = format_db_stats(stats)
+    print(text)
+    write_summary(
+        f"DB census: {stats.open_markets:,} open markets, "
+        f"{stats.markets_with_fresh_snapshot:,} reachable by the scorer",
+        text[:4000],
+        ok=True,
+    )
+    return 0
+
 
 def _retire(engine, shas, token: str) -> int:
     """Retire named deploys. Dry run unless the token matches exactly."""

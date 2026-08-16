@@ -12,9 +12,17 @@ name: maintenance
 #   retire_sha blank + CLOSE-LEGACY-POSITIONS -> unwind legacy positions
 #   retire_sha set   + RETIRE-DEPLOY-SHA      -> retire a deploy from the gate
 # One token for both would mean confirming either confirms both.
+#
+# db_stats is the exception and takes no token: it is SELECT-only. It is
+# checked FIRST so it can never be combined with a destructive input.
 on:
   workflow_dispatch:
     inputs:
+      db_stats:
+        description: "Read-only DB census — table sizes, market statuses, growth rates. Ignores the other two inputs."
+        type: boolean
+        required: false
+        default: false
       retire_sha:
         description: "Deploy SHA to retire from the gate (e.g. e807f8dd). Blank = legacy-position reconcile instead."
         required: false
@@ -39,18 +47,21 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install .
-      - name: Reconcile or retire (acts only if confirmed)
+      - name: Census, reconcile or retire (acts only if confirmed)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           KALSHI_API_KEY: ${{ secrets.KALSHI_API_KEY }}
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY_B64 }}
+          DB_STATS: ${{ inputs.db_stats }}
           RETIRE_SHA: ${{ inputs.retire_sha }}
           CONFIRM: ${{ inputs.confirm }}
         # Inputs go through the environment, never interpolated into the shell
         # command: a workflow_dispatch input is attacker-controlled text and
         # "${{ inputs.x }}" inside `run:` is a shell injection.
         run: |
-          if [ -n "$RETIRE_SHA" ]; then
+          if [ "$DB_STATS" = "true" ]; then
+            python -m src.maintenance --db-stats
+          elif [ -n "$RETIRE_SHA" ]; then
             python -m src.maintenance --retire-sha "$RETIRE_SHA" --confirm "$CONFIRM"
           else
             python -m src.maintenance --confirm "$CONFIRM"

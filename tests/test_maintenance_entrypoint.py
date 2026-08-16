@@ -212,3 +212,43 @@ class TestWorkflowArgumentMatrix:
         assert code == 0, out
         assert "PRODUCTION TRADE RECORD" in out
         assert gate_count(seeded) == 1
+
+
+# --------------------------------------------------------------------------
+# The read-only census, dispatched the way the workflow dispatches it
+# --------------------------------------------------------------------------
+
+def test_db_stats_runs_as_main_and_needs_no_token(seeded, monkeypatch, capsys):
+    """`--db-stats` is the branch reached while something is on fire.
+
+    It carries no confirmation token, so the only thing standing between it and
+    a destructive action is the dispatch order in main(). That order is what
+    this executes.
+    """
+    code, out = run_module(["--db-stats"], seeded, monkeypatch, capsys)
+
+    assert code == 0, out
+    assert "DB CENSUS" in out
+    assert "open markets" in out.lower()
+
+
+def test_db_stats_ignores_a_confirmation_token_entirely(seeded, monkeypatch, capsys):
+    """A census must never become an execution because a token was left in the
+    box from the previous run. The workflow checks db_stats first; so does
+    main(), and this pins that both do."""
+    code, out = run_module(
+        ["--db-stats", "--confirm", "CLOSE-LEGACY-POSITIONS"], seeded, monkeypatch, capsys,
+    )
+
+    assert code == 0, out
+    assert "DB CENSUS" in out
+    # The legacy-position report never ran, so nothing was closed.
+    assert "would close" not in out.lower()
+    with get_session(seeded) as s:
+        assert s.query(Position).filter_by(status="open").count() == 1
+
+
+def test_db_stats_leaves_the_gate_count_untouched(seeded, monkeypatch, capsys):
+    before = gate_count(seeded)
+    run_module(["--db-stats"], seeded, monkeypatch, capsys)
+    assert gate_count(seeded) == before
