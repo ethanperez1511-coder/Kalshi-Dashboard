@@ -157,3 +157,57 @@ class TestShadowNeverTouchesTheRealRecord:
         assert spy.calls == []
         with get_session(engine) as session:
             assert session.query(ShadowMakerOrder).count() == 0
+
+
+class TestShadowIsVisiblePerCycle:
+    """A day of accumulation you cannot see is a day you cannot trust.
+
+    The shadow section was only rendered inside the daily heartbeat block, so
+    the first cycles after the flag was set reported nothing and there was no
+    way to tell "the simulator ran and refused" from "the flag never reached
+    the job". Those are completely different problems and they looked
+    identical.
+    """
+
+    def test_the_execution_summary_names_each_shadow_outcome(self, engine, monkeypatch):
+        import src.run_trading as rt
+        from src.execution.shadow import ShadowOutcome
+
+        def _unproven(engine, **kwargs):
+            return ShadowOutcome(
+                "unproven", Decimal("0"), None, 1, None, "sequence gap",
+            )
+
+        monkeypatch.setattr(rt, "SHADOW_MAKER_ENABLED", True)
+        monkeypatch.setattr(rt, "simulate_shadow_order", _unproven)
+
+        funnel, _ = rt.execute_qualifying(engine, _qualifying(), _Alerter(), now=NOW)
+
+        assert funnel.shadow_outcomes["unproven"] == 1
+        assert "unproven" in funnel.format()
+
+    def test_a_failed_simulation_is_counted_not_swallowed(self, engine, monkeypatch):
+        """Exception-isolated is not the same as unreported."""
+        import src.run_trading as rt
+
+        def _explode(engine, **kwargs):
+            raise RuntimeError("replay refused")
+
+        monkeypatch.setattr(rt, "SHADOW_MAKER_ENABLED", True)
+        monkeypatch.setattr(rt, "simulate_shadow_order", _explode)
+
+        funnel, _ = rt.execute_qualifying(engine, _qualifying(), _Alerter(), now=NOW)
+
+        assert funnel.shadow_outcomes["error"] == 1
+
+    def test_nothing_is_reported_when_the_flag_is_off(self, engine, monkeypatch):
+        """Silence must mean off, and only off."""
+        import src.run_trading as rt
+
+        monkeypatch.setattr(rt, "SHADOW_MAKER_ENABLED", False)
+        monkeypatch.setattr(rt, "simulate_shadow_order", _Spy())
+
+        funnel, _ = rt.execute_qualifying(engine, _qualifying(), _Alerter(), now=NOW)
+
+        assert not funnel.shadow_outcomes
+        assert "shadow" not in funnel.format().lower()

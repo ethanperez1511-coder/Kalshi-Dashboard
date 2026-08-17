@@ -43,6 +43,13 @@ class ExecutionFunnel:
     # number the funnels exist to abolish.
     execution_reasons: Counter = field(default_factory=Counter)
 
+    # What the shadow maker simulator did, per outcome. Reported per CYCLE and
+    # not only in the daily digest: the first cycles after the flag was set
+    # showed nothing at all, so "the simulator ran and refused" and "the flag
+    # never reached the job" were indistinguishable. Those are completely
+    # different problems.
+    shadow_outcomes: Counter = field(default_factory=Counter)
+
     # Alert delivery, separately from trade placement. These are different
     # failures and conflating them is how "did the alert fire?" became
     # unanswerable.
@@ -56,6 +63,9 @@ class ExecutionFunnel:
             # trimmed off — otherwise every rejection is its own unique reason
             # and the counter never aggregates.
             self.rejection_reasons[_reason_key(reason)] += 1
+
+    def record_shadow(self, status: str) -> None:
+        self.shadow_outcomes[status or "unknown"] += 1
 
     def record_execution_nothing(self, reason=None) -> None:
         self.execution_returned_nothing += 1
@@ -87,6 +97,11 @@ class ExecutionFunnel:
             lines.append(f"    {reason}: {n}")
         for reason, n in self.execution_reasons.most_common():
             lines.append(f"    {reason}: {n}")
+        if self.shadow_outcomes:
+            detail = ", ".join(
+                f"{k}={v}" for k, v in self.shadow_outcomes.most_common()
+            )
+            lines.append(f"shadow maker (simulation only, no orders): {detail}")
         if self.alerts_attempted or self.placed:
             undelivered = self.alerts_attempted - self.alerts_delivered
             lines.append(

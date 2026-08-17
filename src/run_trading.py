@@ -220,7 +220,7 @@ def execute_qualifying(
             # failing — it must never cost a cycle.
             if SHADOW_MAKER_ENABLED:
                 try:
-                    simulate_shadow_order(
+                    shadow_outcome = simulate_shadow_order(
                         engine,
                         market_id=result["market_id"],
                         side=result["side"],
@@ -236,7 +236,14 @@ def execute_qualifying(
                         category=opp.get("category", ""),
                         model_name=opp.get("model_name", ""),
                     )
+                    exec_funnel.record_shadow(
+                        getattr(shadow_outcome, "status", "unknown")
+                    )
                 except Exception:
+                    # Isolated, but never unreported: a swallowed failure that
+                    # leaves no count is how a whole day of accumulation turns
+                    # out to be empty with no explanation.
+                    exec_funnel.record_shadow("error")
                     logger.warning(
                         "Shadow maker simulation failed for %s (non-fatal)",
                         result["market_id"], exc_info=True,
