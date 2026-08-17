@@ -30,6 +30,7 @@ from src.database import get_engine, get_session
 from src.models.market import Market
 from src.models.orderbook_raw import OrderbookDeltaRaw
 from src.recorder.health import is_live, recorder_health
+from src.report_guard import publish_report
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -196,14 +197,22 @@ def main(argv=None) -> int:
 
     engine = get_engine(Settings().DATABASE_URL)
     if not recorder_health(engine)["messages"]:
-        logger.error(
+        return publish_report(
+            "Day-7 measurement",
             "No recorded book data — the day-7 clock has not started. Nothing "
-            "here can be derived until the recorder runs."
+            "here can be derived until the recorder runs.",
+            substantive=False,
         )
-        return 1
 
-    print(format_report(measure(engine), clock_start(engine)))
-    return 0
+    results = measure(engine)
+    # `format_report` renders its header whether or not any category made it
+    # through, so the text alone cannot distinguish a healthy run from one that
+    # measured nothing. The result set decides.
+    return publish_report(
+        "Day-7 measurement",
+        format_report(results, clock_start(engine)),
+        substantive=bool(results),
+    )
 
 
 if __name__ == "__main__":

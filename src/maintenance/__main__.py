@@ -47,6 +47,7 @@ from src.maintenance.retire_deploy import (
     format_plan as format_retirement,
     plan_retirement,
 )
+from src.report_guard import publish_report
 from src.run_summary import write_summary
 
 logging.basicConfig(
@@ -121,17 +122,19 @@ def main(argv=None) -> int:
     return 0
 
 def _db_stats(engine) -> int:
-    """Print the census and put it on the Actions summary. Changes nothing."""
+    """Print the census and put it on the Actions summary. Changes nothing.
+
+    A census of a database with no rows in it is not a census — it is a
+    connection to the wrong place, or a schema that never migrated. Either way
+    it must not read as a healthy green check.
+    """
     stats = collect_db_stats(engine)
-    text = format_db_stats(stats)
-    print(text)
-    write_summary(
+    return publish_report(
         f"DB census: {stats.open_markets:,} open markets, "
         f"{stats.markets_with_fresh_snapshot:,} reachable by the scorer",
-        text[:4000],
-        ok=True,
+        format_db_stats(stats),
+        substantive=any(stats.row_counts.values()),
     )
-    return 0
 
 
 def _purge(engine, token: str) -> int:

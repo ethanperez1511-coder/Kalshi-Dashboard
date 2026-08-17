@@ -556,3 +556,39 @@ The general form, which is the same failure as L28 one step earlier: a report
 is only true at the boundary it describes. L28 was claiming done for work that
 had not reached the branch; this is claiming a scope the commit does not have.
 Both are accurate sentences about the wrong object.
+
+## L30 — A green check with an empty body is worse than a red one.
+
+The day-7 job was dispatched, exited 0, and produced no run summary and two
+lines of header in the log. It had "succeeded" while answering nothing, and the
+operator reasonably read the green check as "ran fine" — which ended the
+investigation instead of starting it.
+
+Two defects, both mine, both the same mistake:
+
+- `day7.main` printed to stdout and never wrote the run summary, unlike every
+  other dispatchable action. The summary was empty by construction.
+- `format_report` renders its header whether or not any category survived, so
+  an empty result set looks like a title with no body, and returns 0 either way.
+
+The rule: **for a read-only diagnostic, "measured nothing" is a FAILURE state,
+and it must be reported through the same channel a success would use.** Not a
+log line, not a silence — the same summary, marked failed.
+
+Two corollaries worth keeping:
+
+**Emptiness is decided by the caller, not inferred from the text.** `publish_report`
+takes an explicit `substantive` flag, because inferring it from the rendered
+string would be fooled by exactly the header that caused this.
+
+**Kill the class.** A test asserts EVERY read-only dispatch fails on an empty
+database. Fixing day-7 alone would have left the next one free to repeat it,
+and there will be a next one.
+
+The related trap found while fixing this: `trade.yml` passed no `TRADING_*`
+variables at all, so `TRADING_SHADOW_MAKER_ENABLED` and
+`TRADING_EXCLUDED_SERIES` were configurable in the code and inert in the
+deployment. I had told the operator exclusions were "one environment variable,
+not a patch". That was true of the reader and false of the path. A config flag
+the workflow does not pass is not a config flag — there is now a test that
+enumerates the operator-settable ones and asserts each is wired.

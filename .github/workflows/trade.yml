@@ -45,4 +45,18 @@ jobs:
           # literal-\n corruption hit on Railway, commit 7d35af5).
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY_B64 }}
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          # Operator-settable configuration, as repository VARIABLES rather than
+          # secrets: these are settings, not credentials, and a value nobody can
+          # read back is a value nobody can verify was set.
+          #
+          # An unset variable renders as an empty string and _env_bool falls
+          # through to the coded default, so absence changes nothing. Neither
+          # can enable live trading — `mode` lives in the DB and the live gate
+          # is untouched by both.
+          #
+          # Passed here because they were NOT before: both are read from the
+          # environment by trading_config, so setting the repository variable
+          # would have silently done nothing at all.
+          TRADING_SHADOW_MAKER_ENABLED: ${{ vars.TRADING_SHADOW_MAKER_ENABLED }}
+          TRADING_EXCLUDED_SERIES: ${{ vars.TRADING_EXCLUDED_SERIES }}
         run: python -m src.run_trading   # single cycle (NO --loop)
