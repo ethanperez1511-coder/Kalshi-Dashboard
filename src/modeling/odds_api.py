@@ -128,6 +128,13 @@ def devig_book_then_average(book_outcomes: List[List[float]]) -> List[float]:
     return [avg_yes, avg_no]
 
 
+# How long a cached EMPTY slate is trusted. Deliberately far longer than the
+# live-slate TTL: an out-of-season league is not going to start playing within
+# the afternoon, and re-asking is what exhausted the quota. Short enough that a
+# season opening is picked up within a day.
+EMPTY_PAYLOAD_TTL_SECONDS = 24 * 3600
+
+
 class OddsClient:
     def __init__(
         self,
@@ -186,10 +193,15 @@ class OddsClient:
             return None
         fetched_at, payload, _source = cached
         age = (now - fetched_at).total_seconds()
-        limit = _MAX_STALE_SECONDS if allow_stale else self._ttl
+        # An empty slate lives longer than a live one. "This league has no
+        # games" is the most stable fact the provider returns — an out-of-season
+        # league does not come back within four hours — and refreshing it on the
+        # live-slate cadence is what spent a month of quota in an afternoon.
+        ttl = EMPTY_PAYLOAD_TTL_SECONDS if not payload else self._ttl
+        limit = _MAX_STALE_SECONDS if allow_stale else ttl
         if age >= limit:
             return None
-        if allow_stale and age >= self._ttl:
+        if allow_stale and age >= ttl:
             logger.warning(
                 f"Serving {sport_key} odds {age / 3600:.1f}h old — every source failed"
             )
@@ -261,12 +273,30 @@ class OddsClient:
             self._ledger.charge(month_key(now), source.name, 1)
 
         raw = source.fetch(sport_key)
+
+        # Prefer the provider's own count over ours the moment it is available.
+        provider_used = getattr(source, "last_requests_used", None)
+        if provider_used is not None and self._ledger is not None:
+            local = self._ledger.used(month_key(now), source.name)
+            if provider_used != local:
+                logger.info(
+                    "Odds quota reconciled: local %d -> provider %d (remaining %s)",
+                    local, provider_used,
+                    getattr(source, "last_requests_remaining", "?"),
+                )
+                self._ledger.reconcile(month_key(now), source.name, provider_used)
         games = (
             self._parse_response(raw, sport_key)
             if source.name == "the_odds_api"
             else list(raw)
         )
-        if games and self._store is not None:
+        if self._store is not None:
+            # Written whether or not there were games. Reaching this line means
+            # the request SUCCEEDED — every failure path raised above — so an
+            # empty list is an answer, not a miss. The previous `if games:`
+            # guard meant an out-of-season league was re-requested every cycle
+            # forever: 288 cron cycles a day, two dead leagues, and a 500-call
+            # month gone in an afternoon.
             self._store.put(sport_key, source.name, [asdict(g) for g in games], now)
         return games
 

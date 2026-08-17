@@ -57,6 +57,12 @@ class TheOddsApiSource:
     def __init__(self, api_key: str, http=httpx):
         self._api_key = api_key
         self._http = http
+        # The provider counts our usage too, and its count is the one that
+        # actually gates the account. Ours is an inference from calls we
+        # believe we made; theirs is the truth, and it arrives free on every
+        # response. Captured here, reconciled by the client.
+        self.last_requests_used = None
+        self.last_requests_remaining = None
 
     def fetch(self, sport_key: str) -> List[dict]:
         """Return the provider's raw event list, or raise.
@@ -74,6 +80,7 @@ class TheOddsApiSource:
             },
             timeout=15.0,
         )
+        self._read_quota_headers(resp)
         if resp.status_code in (401, 429):
             raise QuotaExhausted(
                 f"Odds API refused {sport_key}: {resp.status_code}"
@@ -84,6 +91,18 @@ class TheOddsApiSource:
         if resp.status_code != 200:
             raise RuntimeError(f"Odds API {sport_key} returned {resp.status_code}")
         return resp.json()
+
+    def _read_quota_headers(self, resp) -> None:
+        headers = getattr(resp, "headers", None) or {}
+        self.last_requests_used = _as_int(headers.get("x-requests-used"))
+        self.last_requests_remaining = _as_int(headers.get("x-requests-remaining"))
+
+
+def _as_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class EspnOddsSource:

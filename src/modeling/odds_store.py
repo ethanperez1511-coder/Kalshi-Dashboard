@@ -99,6 +99,29 @@ class QuotaLedger:
             return row.requests_used
 
 
+    def reconcile(self, month: str, source: str, provider_used: int) -> int:
+        """Adopt the provider's own usage count.
+
+        Our ledger is an inference from calls we believe we made; the provider
+        publishes the number that actually gates the account on every response
+        header. Where they disagree the provider wins, in both directions — an
+        over-count of ours would blind the model for the rest of the month, and
+        an under-count would walk it into a 429.
+
+        Caveat kept explicit: the provider's counter follows ITS billing
+        period, which need not align with our calendar-month key. This writes
+        the number that governs spending now, not a historical audit.
+        """
+        with get_session(self._engine) as session:
+            row = session.query(OddsQuotaUsage).filter_by(month=month, source=source).first()
+            if row is None:
+                row = OddsQuotaUsage(month=month, source=source, requests_used=0)
+                session.add(row)
+            row.requests_used = int(provider_used)
+            session.commit()
+            return row.requests_used
+
+
 def default_ttl_seconds(n_sports: int, monthly_cap: int) -> float:
     """Longest refresh interval that keeps a month of polling inside the cap.
 
