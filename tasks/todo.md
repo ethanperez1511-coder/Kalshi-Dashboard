@@ -1181,3 +1181,139 @@ production has nothing checking it.
       never moves `paper_trade_count`.
 - [ ] W4. Two-floor report in the daily digest, per category, no pooled PnL.
 - [ ] W5. Evidence recorded here BEFORE SHADOW_MAKER_ENABLED is set anywhere.
+
+---
+
+# SPEC (for approval, NOT built): per-series maker enable
+
+Written per the approved requirements. Nothing below is implemented. Two items
+marked **RULING NEEDED** change or extend what was agreed and want an explicit
+yes before I build.
+
+## Requirements as given
+1. Config expresses a per-series allow-list. Empty = maker nowhere. Empty is
+   the default.
+2. A series absent from the list is taker, regardless of evidence.
+3. The preflight checklist gates the FIRST addition of any series.
+4. The digest names which series are maker-enabled, so state is always visible.
+5. `TRADING_MAKER_ENABLED` is a global master that overrides the list to OFF.
+   Two independent conditions to enable, one to kill.
+
+## Config
+    TRADING_MAKER_ENABLED         bool, default False   (global master)
+    TRADING_MAKER_ENABLED_SERIES  str,  default ""      (comma-separated)
+
+Matched on the whole series token, case-insensitive, exactly as the ingest
+exclusion list is — "KXHIGH" as a prefix rule would enable all seven cities at
+once, which is the failure this spec exists to prevent.
+
+**Interaction with L31, and it matters here.** `_env_str` now treats an empty
+value as absent and returns the coded default. That is safe ONLY because this
+default is itself empty: absent, empty and "maker nowhere" all coincide. If the
+default were ever made non-empty, an operator could not turn it off by clearing
+the repository variable — they would have to set it to a sentinel. The default
+must therefore stay `""` permanently, and a test should assert that.
+
+## Resolution
+    def maker_allowed_for(market_id: str) -> bool:
+        if not MAKER_ENABLED:            # global master, kills everything
+            return False
+        return series_of(market_id) in MAKER_ENABLED_SERIES
+
+Two independent conditions to enable, one to kill, exactly as specified.
+
+## Enforcement — the part that carries the real risk
+`ORDER_TYPE` is currently a single global string read by BOTH `ev/fills.py`
+(`fill_prices`) and `ev/calculator.py` (`calculate_ev`). Per-series maker means
+that global becomes a per-market resolution, and both readers must resolve it
+the SAME way for the same market.
+
+If evaluation resolves maker while execution resolves taker, the trade is
+justified at one price and filled at another. That is trade 1/50 exactly: NO
+edge +0.0329 at 91c versus +0.0229 at 92c, either side of the 0.03 gate it
+passed on. `src/ev/fills.py` exists because of it.
+
+So the resolved order type must be computed ONCE per market and threaded to
+both, never read independently in two places. The test for this is an identity
+test in the L26 shape: for a market, the order type used by `calculate_ev` and
+the order type used by `_compute_fill_price` must be asserted equal — compared
+directly, not each compared to a constant.
+
+Note also that paper trading currently bypasses maker pricing entirely when
+`PAPER_CONSERVATIVE_FILLS` is on, which it is. So enabling a series changes
+nothing about paper fills until that flag is deliberately changed — a third
+condition, and one worth keeping.
+
+## Preflight gating
+**RULING NEEDED (1).** As specified, preflight gates the FIRST addition of any
+series. I propose something stricter: preflight is re-checked EVERY cycle while
+the list is non-empty, and any blocker forces maker off for all series with a
+loud error, rather than only being consulted when a series is first added.
+
+Reason: a gate that runs once is a gate that was true once. The decimal
+migration, the "capture beats taker" check and the live-gate check can all stop
+being true after the addition, and a first-addition-only gate would never look
+again. It also fails closed, which is the direction this system takes
+everywhere else.
+
+Cost: an extra checklist run per cycle. It is DB-only and cheap.
+
+## Evidence, at the granularity of the switch
+**RULING NEEDED (2).** `day7.measure` currently buckets by CLAIMING MODEL, with
+per-series print counts as detail only. A per-series switch needs a per-series
+bar: hours, prints, own measured multi-level rate, and N — all seven computed
+independently, not one model number with a footnote.
+
+So `scope_for_market` needs to return series-level buckets for WeatherModel
+(e.g. `WeatherModel:KXHIGHLAX`), and `recorder_health` inherits it through the
+same injected scope function it already takes. Otherwise the switch is finer
+than the evidence, which is how LA licenses Denver — the exact failure this
+whole spec exists to prevent, reappearing between the measurement and the
+control.
+
+On current data that likely means LAX/CHI/NY/MIA reach their own bars and
+AUS/PHIL/DEN do not, which is the intended outcome and a finding in itself.
+
+## Visibility
+Per cycle and in the daily digest, always, including when nothing is enabled:
+
+    maker: OFF (global master disabled)
+    maker: OFF (master on, no series enabled)
+    maker: ENABLED for KXHIGHLAX, KXHIGHCHI — 5 series taker
+
+Stated when empty for the same reason the ingest exclusion list is: a filter
+that reports only when it does something makes "off" and "did nothing this
+cycle" identical, which cost a day on 2026-08-17 (L31).
+
+## Safety statement (per CLAUDE.md)
+- Defaults are OFF and empty. Doing nothing keeps every series on taker.
+- Nothing here touches `mode`, `paper_trading_mode`, `can_trade_live` or the
+  50-trade gate. Maker/taker is an execution-style choice within paper.
+- Risk limits untouched: quarter-Kelly, 3%/trade, 25% exposure, 20% breaker.
+- Fails closed everywhere: unknown series, empty list, master off, preflight
+  blocker, or a resolution disagreement between evaluation and execution all
+  resolve to taker.
+- No path here can place a live order; live remains gated separately.
+
+## Tests to write (TDD, before implementation)
+- master off + series listed -> taker. Master on + series absent -> taker.
+  Master on + series listed -> maker. Empty list -> taker everywhere.
+- default config resolves to maker nowhere, asserted against the shipped
+  defaults rather than a fixture.
+- the default series list is empty, asserted directly (the L31 interaction).
+- whole-token matching: `KXHIGH` does not enable `KXHIGHNY`.
+- IDENTITY: evaluation and execution resolve the same order type for the same
+  market, compared to each other.
+- preflight blocker forces maker off for every series, with the reason named.
+- digest names enabled series, and says so when none are.
+- per-series day-7 bars computed independently; one series clearing does not
+  make another projectable.
+
+## Open questions for approval
+1. Preflight every cycle rather than only at first addition — agreed?
+2. day-7 re-cut to series-level buckets for weather, as the companion change
+   without which the switch is finer than the evidence — agreed?
+3. `PAPER_CONSERVATIVE_FILLS` stays on, so enabling a series changes paper fill
+   pricing not at all until that flag is separately changed. Confirm that is
+   intended: it means enabling a series is observable only in shadow until a
+   further deliberate step.
