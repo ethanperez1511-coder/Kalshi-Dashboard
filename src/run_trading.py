@@ -338,9 +338,11 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
             # Approved by risk, then produced no trade: an order that did not
             # fill, a client error, a market that moved. Distinct from a risk
             # refusal and previously indistinguishable from one.
-            logger.warning("  ✗ %s: approved but execution returned nothing",
-                           opp["market_id"])
-            exec_funnel.execution_returned_nothing += 1
+            logger.warning(
+                "  ✗ %s: approved but execution returned nothing — %s",
+                opp["market_id"], te.last_refusal or "unspecified",
+            )
+            exec_funnel.record_execution_nothing(te.last_refusal)
         if result:
             trades_placed += 1
             exec_funnel.placed += 1

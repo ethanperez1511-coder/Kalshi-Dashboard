@@ -37,6 +37,12 @@ class ExecutionFunnel:
     # cluster cap and a drawdown breaker are never the same line.
     rejection_reasons: Counter = field(default_factory=Counter)
 
+    # Why execution returned nothing after risk approved. "execution returned
+    # none 1" was the only line this funnel could produce for the single
+    # qualifying opportunity in a cycle, which is exactly the uninterrogable
+    # number the funnels exist to abolish.
+    execution_reasons: Counter = field(default_factory=Counter)
+
     # Alert delivery, separately from trade placement. These are different
     # failures and conflating them is how "did the alert fire?" became
     # unanswerable.
@@ -50,6 +56,10 @@ class ExecutionFunnel:
             # trimmed off — otherwise every rejection is its own unique reason
             # and the counter never aggregates.
             self.rejection_reasons[_reason_key(reason)] += 1
+
+    def record_execution_nothing(self, reason=None) -> None:
+        self.execution_returned_nothing += 1
+        self.execution_reasons[reason or "unspecified"] += 1
 
     def attributed(self) -> int:
         return (
@@ -75,6 +85,8 @@ class ExecutionFunnel:
             )
         for reason, n in self.rejection_reasons.most_common():
             lines.append(f"    {reason}: {n}")
+        for reason, n in self.execution_reasons.most_common():
+            lines.append(f"    {reason}: {n}")
         if self.alerts_attempted or self.placed:
             undelivered = self.alerts_attempted - self.alerts_delivered
             lines.append(
@@ -86,8 +98,12 @@ class ExecutionFunnel:
     def headline(self) -> str:
         return (
             f"{self.placed}/{self.qualifying} placed "
-            f"(risk {self.risk_rejected}, exec {self.execution_returned_nothing}, "
-            f"alerts {self.alerts_delivered}/{self.alerts_attempted})"
+            f"(risk {self.risk_rejected}, exec {self.execution_returned_nothing}"
+            + (
+                f" [{self.execution_reasons.most_common(1)[0][0]}]"
+                if self.execution_reasons else ""
+            )
+            + f", alerts {self.alerts_delivered}/{self.alerts_attempted})"
         )
 
 

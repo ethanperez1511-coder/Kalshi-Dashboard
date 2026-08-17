@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from collections import Counter
 import asyncio
 import logging
 from datetime import datetime, timezone
@@ -85,6 +87,17 @@ class TradeEngine:
         self._engine = engine
         self._client = kalshi_client
         self._fill_timeout = DEFAULT_FILL_TIMEOUT
+        # Why execute() last returned None, and the running tally. Three paths
+        # return None and they mean entirely different things: a routine
+        # already-held market and a fill price that no longer matches the one
+        # the edge was computed at are not the same event, and reporting them
+        # as one number made the second invisible.
+        self.refusals: Counter = Counter()
+        self.last_refusal: Optional[str] = None
+
+    def _refuse(self, reason: str) -> None:
+        self.last_refusal = reason
+        self.refusals[reason] += 1
 
     def _has_open_position(self, market_id: str) -> bool:
         with get_session(self._engine) as session:
@@ -146,14 +159,19 @@ class TradeEngine:
         traded_edge: Optional[float] = None,
         evaluated_price: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
+        # A stale reason carried into the next opportunity is worse than none.
+        self.last_refusal = None
+
         if not decision.approved:
             logger.info(f"Trade rejected for {market_id}: {decision.rejection_reasons}")
+            self._refuse("risk_rejected")
             return None
 
         # Skip markets we already hold: re-entering every cycle concentrates risk
         # and burns the paper-trade evaluation on a handful of markets.
         if SKIP_HELD_MARKETS and self._has_open_position(market_id):
             logger.info(f"Skipping {market_id}: position already open")
+            self._refuse("position_already_open")
             return None
 
         # A config flag is not a decision. If maker execution is switched on
@@ -178,6 +196,7 @@ class TradeEngine:
                 "passed the gate is not the edge available",
                 market_id, evaluated_price, fill_price,
             )
+            self._refuse("fill_price_diverged")
             return None
 
         if is_paper:
