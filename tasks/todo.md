@@ -1094,3 +1094,90 @@ stays off for weather in that case. The `day7` dispatch answers it directly.
 Ingest filter: 14 tests. Purge: 16 tests, TDD. Growth: 8 tests including a
 reproduction of the measured emergency (60 MB/day vs 126 MB -> ~2.1 days).
 Full suite 874 passed, 2 deselected.
+
+---
+
+# Phase 3 — fill-simulator wiring (spec approved 2026-08-17)
+
+Restated from the operator's approval and written down before implementation,
+because everything below was previously carried verbally while the code that
+implements it sat unreachable.
+
+## Status of the parts
+Built and unit-tested ALREADY: `execution/replay.py` (book reconstruction, four
+refusals), `execution/fill_sim.py` (the fill rule), `execution/walkup.py` (the
+ladder), `execution/shadow.py` (`simulate_order`, `report_by_category`),
+`execution/preflight.py` (the maker blockers), `models/shadow.py`.
+
+MISSING: the wiring. Nothing in the pipeline calls `simulate_order`. Grep for
+callers returns only preflight (which reads reports) and the tests. This is the
+L27 shape for the fourth time — the unit is right and the path between it and
+production has nothing checking it.
+
+## FILL RULE (approved, from the probe findings)
+- A resting YES bid at price P fills ONLY when a print has
+  `taker_outcome_side == "no"`, `yes_price` strictly LESS than P,
+  `is_block_trade == false`, and the reconstructed book confirms the order was
+  still resting at that moment.
+- Rationale: Kalshi matches strict price-time priority and consumes bids
+  best-first, so a taker reaching a price worse than P must have exhausted all
+  of level P including us. No queue-position assumption — queue position is
+  confirmed absent from public data, so any rule needing it would be invention.
+- At-level partials are DISCARDED. Only ~10% of taker events touched >= 2
+  levels on the liquid probe; the bias lands in the count, not the price.
+- Fills on trade-through, never on touch.
+- An order whose rest spans a sequence gap is UNPROVEN: a third state, excluded
+  from fill-frequency entirely rather than counted either way.
+
+## REPORTING (approved, with the two-biases ruling)
+- Two floors, never collapsed:
+  1. recognised-fill spread capture — floor on per-fill economics, compared to
+     taker per fill through the instrumented gap.
+  2. recognised-fill frequency — floor on volume.
+- NO pooled shadow-PnL headline. The fill rule over-represents adverse
+  selection by construction (a trade-through means the market moved decisively
+  against the resting side), so one PnL number would launder that bias into a
+  verdict. A test asserting no combined figure appears already exists — keep it.
+
+## MECHANICS (approved)
+- Walk-up ladder from the start price toward cap = `p_model` minus required
+  edge. Execution can never trade away the edge that justified the trade. The
+  cap-stops-the-walk case is demonstrated by a test, not asserted — exists,
+  keep it.
+- Decimal end-to-end on the maker path. Fractional contracts are first-class:
+  1,541 of 2,299 observed fills were non-integer.
+- SHADOW ONLY. ShadowMakerOrder rows in their own table; taker paper fills
+  continue untouched so the 50-trade gate keeps exactly one meaning.
+  `MAKER_ENABLED` and `SHADOW_MAKER_ENABLED` both stay default-false.
+- Every parameter (rest time, step size, cadence) config-driven — Phase 4
+  sweep targets, not constants.
+
+## VALIDATION GATING
+- N derived PER CATEGORY from measured trade-through rates (`day7.py`).
+- 24 live recorded hours AND 200 prints minimum before any N is emitted.
+- NEVER pooled: a liquid category must not carry an illiquid one through
+  validation. If weather cannot produce a validatable sample that finding
+  stands on its own and maker stays off for weather; sports may promote
+  independently.
+- Build now — the simulator is measurement-independent. The gate applies at
+  PROMOTION time, not build time.
+
+## Safety statement (per CLAUDE.md)
+- Shadow only. No path here places, sizes or blocks a real order.
+- `paper_trading_mode` / `mode` / `can_trade_live` untouched. Both maker flags
+  default false and the wiring is a no-op while they are.
+- Writes go to `shadow_maker_orders` alone. `trades`, `positions` and the
+  50-trade gate counter are never touched, so the gate cannot change meaning.
+- Risk limits untouched: quarter-Kelly, 3%/trade, 25% exposure, 20% breaker.
+- A simulation failure must never fail a trading cycle — it is reporting.
+
+## Tasks
+- [ ] W1. Call `simulate_order` from the execution loop after a taker paper
+      trade is placed, gated on SHADOW_MAKER_ENABLED, exception-isolated.
+- [ ] W2. Wiring tests in the L27 shape: the pipeline CALLS it when enabled and
+      does NOT when disabled, asserted against the real entry point rather than
+      by importing the unit.
+- [ ] W3. Assert the shadow path never writes to `trades` / `positions` and
+      never moves `paper_trade_count`.
+- [ ] W4. Two-floor report in the daily digest, per category, no pooled PnL.
+- [ ] W5. Evidence recorded here BEFORE SHADOW_MAKER_ENABLED is set anywhere.
