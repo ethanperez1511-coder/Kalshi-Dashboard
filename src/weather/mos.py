@@ -37,6 +37,11 @@ _PLAUSIBLE_F = (-80.0, 140.0)
 MIN_LEADS = 4
 MAX_LEAD_DAYS = 7
 
+# How many days of older 12Z runs to walk back through when the newest is not
+# published yet. Bounded: a run older than this is stale enough that the fit
+# for its lead is the honest refusal, not a fallback.
+MAX_RUN_LOOKBACK_DAYS = 2
+
 
 class MosUnavailable(RuntimeError):
     """No usable guidance for this station/run. The caller must not substitute."""
@@ -144,12 +149,80 @@ def fetch_run(
 def forecast_for(
     station: str, target_date: dt.date, lead_days: int, http=httpx,
 ) -> Optional[MosForecast]:
-    """The forecast of `target_date`'s max issued `lead_days` earlier."""
+    """The forecast of `target_date`'s max issued exactly `lead_days` earlier.
+
+    Demands one specific run. Production wants the best AVAILABLE forecast and
+    uses `latest_forecast_for` — see the note there on why asking for an exact
+    run was a daily blackout.
+    """
     runtime = run_time_for(target_date, lead_days)
     for forecast in fetch_run(station, runtime, http=http):
         if forecast.target_date == target_date:
             return forecast
     return None
+
+
+def latest_forecast_for(
+    station: str,
+    target_date: dt.date,
+    now: Optional[dt.datetime] = None,
+    http=httpx,
+    max_lookback_days: Optional[int] = None,
+) -> MosForecast:
+    """The newest PUBLISHED 12Z run that forecasts `target_date`. Or raises.
+
+    The bug this replaces: production computed `lead = target - today` and then
+    asked for the run at `target - lead`, which is always TODAY's 12Z. Those
+    cancel, so leads 2 and 3 never fell back to older runs that are certainly
+    published. The 12Z MEX run does not reach the IEM archive until roughly
+    17:30 UTC — measured 2026-08-16, HTTP 404 at 17:25 and present at 17:32 —
+    so every station refused at every lead for about 73% of the day's cycles.
+
+    Two properties are load-bearing and both are tested.
+
+    It never leaves MEX 12Z. Sigma was fitted on that product, so falling back
+    to the 00Z cycle would price off a predictor whose error distribution was
+    never measured. A confident number from an unvalidated model is worse than
+    no number.
+
+    The forecast carries the lead of the run that ACTUALLY produced it, not the
+    lead the caller hoped for, and the caller must load the fit for
+    `forecast.lead_days`. A lead-1 fit applied to a two-day-old run is a
+    precise statement about the wrong distribution.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    lookback = MAX_RUN_LOOKBACK_DAYS if max_lookback_days is None else max_lookback_days
+
+    attempted: List[str] = []
+    for back in range(0, lookback + 1):
+        run_date = now.date() - dt.timedelta(days=back)
+        lead = (target_date - run_date).days
+        if lead < 1 or lead > MAX_LEAD_DAYS:
+            # Already past, or beyond what a MEX run reaches.
+            continue
+
+        runtime = dt.datetime(
+            run_date.year, run_date.month, run_date.day, RUN_HOUR,
+            tzinfo=dt.timezone.utc,
+        )
+        if runtime > now:
+            # A run whose cycle hour has not passed cannot exist. Asking anyway
+            # is a guaranteed 404 on every cycle before midday.
+            continue
+
+        try:
+            for forecast in fetch_run(station, runtime, http=http):
+                if forecast.target_date == target_date:
+                    return forecast
+            attempted.append(f"{run_date}: run present but no {target_date} row")
+        except MosUnavailable as exc:
+            attempted.append(str(exc))
+            continue
+
+    raise MosUnavailable(
+        f"{station}: no published 12Z run within {lookback} days forecasts "
+        f"{target_date} — tried [{'; '.join(attempted) or 'no eligible runs'}]"
+    )
 
 
 def index_by_target(forecasts: List[MosForecast]) -> Dict[dt.date, MosForecast]:

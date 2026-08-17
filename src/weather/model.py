@@ -199,23 +199,16 @@ class WeatherModel(BaseModel):
             return None
 
         today = self._now().date()
-        lead = (target - today).days
-        if lead < 1 or lead > MAX_PRICEABLE_LEAD:
+        intended_lead = (target - today).days
+        if intended_lead < 1 or intended_lead > MAX_PRICEABLE_LEAD:
             self.refusals[
-                "lead_past" if lead < 1 else f"lead_beyond_{MAX_PRICEABLE_LEAD}d"
+                "lead_past" if intended_lead < 1
+                else f"lead_beyond_{MAX_PRICEABLE_LEAD}d"
             ] += 1
             return None
 
-        cache_key = (station.mos_station, lead)
-        if cache_key not in self._fit_cache:
-            self._fit_cache[cache_key] = load_fit(engine, station.mos_station, lead)
-        fit_record = self._fit_cache[cache_key]
-        ok, reason = cell_priceable(fit_record, self._now())
-        if not ok:
-            logger.info("Weather: %s unpriceable — %s", market_id, reason)
-            self.refusals[f"cell_{reason}"] += 1
-            return None
-
+        # Guard first: one cached DB read per series, and it can veto the whole
+        # city, so it runs ahead of anything that costs an HTTP call.
         if station.series_ticker not in self._guard_cache:
             self._guard_cache[station.series_ticker] = guard_paused(
                 engine, station.series_ticker,
@@ -226,14 +219,20 @@ class WeatherModel(BaseModel):
             self.refusals["guard_paused"] += 1
             return None
 
-        # One MOS fetch per (station, target, lead) per cycle, not per contract.
-        # A city-day ladder is six contracts sharing one forecast, so this was
-        # six identical HTTP calls.
-        forecast_key = (station.mos_station, target, lead)
+        # The forecast resolves BEFORE the fit, because until the run is in hand
+        # the lead is not known. This used to compute the lead from today and
+        # then demand the run at target-minus-lead — always today's 12Z, which
+        # does not reach the IEM archive until ~17:30 UTC, so weather refused
+        # for roughly 73% of the day's cycles. Now the newest PUBLISHED 12Z run
+        # wins and the lead comes from it.
+        #
+        # One fetch per (station, target) per cycle: a city-day ladder is six
+        # contracts sharing one forecast.
+        forecast_key = (station.mos_station, target)
         if forecast_key not in self._forecast_cache:
             try:
-                self._forecast_cache[forecast_key] = mos.forecast_for(
-                    station.mos_station, target, lead,
+                self._forecast_cache[forecast_key] = mos.latest_forecast_for(
+                    station.mos_station, target, now=self._now(),
                     **({"http": self._http} if self._http is not None else {}),
                 )
             except mos.MosUnavailable as exc:
@@ -242,6 +241,34 @@ class WeatherModel(BaseModel):
         forecast = self._forecast_cache[forecast_key]
         if forecast is None:
             self.refusals["mos_unavailable"] += 1
+            return None
+
+        # The lead the run actually carries. The fallback can push this past the
+        # limit even when the target itself is close, and that gets its own
+        # counter: "the newest guidance available is too old to price from" is a
+        # different situation from a contract that was always too far out.
+        lead = forecast.lead_days
+        if lead > MAX_PRICEABLE_LEAD:
+            logger.info(
+                "Weather: %s unpriceable — newest published run is %dd from "
+                "target, past the %dd limit",
+                market_id, lead, MAX_PRICEABLE_LEAD,
+            )
+            self.refusals[f"lead_beyond_{MAX_PRICEABLE_LEAD}d_after_fallback"] += 1
+            return None
+
+        # The fit for the lead the forecast HAS, never the lead we wanted. A
+        # lead-1 sigma on a lead-2 forecast is a precise statement about the
+        # wrong distribution, and the number it produces looks exactly like a
+        # good one.
+        cache_key = (station.mos_station, lead)
+        if cache_key not in self._fit_cache:
+            self._fit_cache[cache_key] = load_fit(engine, station.mos_station, lead)
+        fit_record = self._fit_cache[cache_key]
+        ok, reason = cell_priceable(fit_record, self._now())
+        if not ok:
+            logger.info("Weather: %s unpriceable — %s", market_id, reason)
+            self.refusals[f"cell_{reason}"] += 1
             return None
 
         fit = fit_record.as_cell_fit()
