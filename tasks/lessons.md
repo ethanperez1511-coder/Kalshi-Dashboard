@@ -527,3 +527,32 @@ consumer reads from, never at the boundary I last wrote to. A test suite reads
 the working tree. Actions reads the default branch. A scheduled job reads the
 default branch on its own timer. Those are three different definitions of done
 and only the last one is production.
+
+## L29 — Stage by intent. One topic per commit.
+
+Twice in one session I wrote a focused commit message, ran `git add -A`, and
+shipped unrelated work under it. The first time the recorder rewrite went out
+under "the live-checks alert reported success whether or not it was delivered";
+the second, the execution-refusal work went out under an odds-caching message.
+Both were caught only because I re-read `--stat` afterwards.
+
+Nobody reads the diff a year later. They read `git log`, and a commit whose
+message describes a third of its contents is worse than no message: it asserts
+a scope that is false. `git bisect` lands on it, the message says "odds
+caching", and the actual break is in the trade engine.
+
+The rule: **stage the specific paths that belong to the commit you are about to
+write.** `git add <paths>` — never `git add -A` unless the working tree really
+is one topic and you have just confirmed that with `git status`.
+
+Two checks, both cheap:
+- `git status --short` before staging. If the list spans more than one concern,
+  that is more than one commit.
+- `git show --stat HEAD` after committing. If a file in the list would surprise
+  someone reading the subject line, split it with
+  `git reset --soft HEAD~1 && git reset`.
+
+The general form, which is the same failure as L28 one step earlier: a report
+is only true at the boundary it describes. L28 was claiming done for work that
+had not reached the branch; this is claiming a scope the commit does not have.
+Both are accurate sentences about the wrong object.
