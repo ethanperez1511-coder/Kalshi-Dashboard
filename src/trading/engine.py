@@ -8,6 +8,7 @@ from typing import Optional, Dict, Any
 from sqlalchemy import Engine
 from src.database import get_session
 from src.ev.fills import fill_prices
+from src.execution.allowlist import resolve_order_type
 from src.models.trade import Trade
 from src.models.position import Position
 from src.models.settings import TradingSettings
@@ -129,7 +130,7 @@ class TradeEngine:
 
     def _compute_fill_price(
         self, decision: TradeDecision, yes_bid: int = 0, yes_ask: int = 0,
-        is_paper: bool = True,
+        is_paper: bool = True, order_type: str = "",
     ) -> int:
         """What this trade costs, from the same function that priced its EV.
 
@@ -137,9 +138,13 @@ class TradeEngine:
         the EV was computed at 100 - last_price and the fill taken at
         100 - yes_bid. See src/ev/fills.py.
         """
+        # `order_type` is RESOLVED BY THE CALLER and threaded in. Pricing must
+        # not resolve it itself: a second independent read of the order type
+        # for one market is the trade 1/50 divergence rebuilt, and it would
+        # also give this pure pricing helper a database dependency.
         yes_fill, no_fill = fill_prices(
             decision.price_cents if decision.side == "yes" else 100 - decision.price_cents,
-            yes_bid, yes_ask, is_paper=is_paper,
+            yes_bid, yes_ask, order_type, is_paper=is_paper,
         )
         return yes_fill if decision.side == "yes" else no_fill
 
@@ -184,7 +189,12 @@ class TradeEngine:
         is_paper = mode_info["mode"] == "paper" or not self.can_trade_live()
 
         # Compute realistic fill price (paper uses conservative taker pricing)
-        fill_price = self._compute_fill_price(decision, yes_bid, yes_ask, is_paper=is_paper)
+        # One resolution for this market, used for the fill price here and
+        # matched against the price the scorer evaluated at.
+        order_type = resolve_order_type(self._engine, market_id)
+        fill_price = self._compute_fill_price(
+            decision, yes_bid, yes_ask, is_paper=is_paper, order_type=order_type,
+        )
 
         # A trade that costs a different price than the one that justified it
         # was justified by a different trade. One cent either side of the edge

@@ -123,7 +123,10 @@ def test_paper_fill_crosses_spread_no(db_engine):
 
 
 def test_live_fill_price_unchanged_by_paper_flag(db_engine):
-    # Live (non-paper) maker pricing keeps posting inside the spread.
+    # Taker now, not maker. With a per-series allow-list the default is maker
+    # NOWHERE, so an unlisted series crosses the spread on the live path too:
+    # YES pays the ask. That is the conservative direction and the approved
+    # default — maker pricing needs the master flag AND the series listed.
     engine = TradeEngine(db_engine)
     price = engine._compute_fill_price(_decision("yes", 50), yes_bid=48, yes_ask=52, is_paper=False)
-    assert price == 49  # bid + 1 (maker default)
+    assert price == 52  # the ask

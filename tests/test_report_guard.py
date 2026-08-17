@@ -99,7 +99,7 @@ class TestDay7:
 
         monkeypatch.setattr(day7, "get_engine", lambda url: engine)
         assert day7.main([]) == 0
-        assert "Weather" in summary.read_text()
+        assert "WeatherModel" in summary.read_text()
 
     def test_no_recorder_data_at_all_still_fails_loudly(
         self, tmp_path, summary, monkeypatch,

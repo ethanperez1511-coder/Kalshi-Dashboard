@@ -223,7 +223,14 @@ MAX_SNAPSHOT_AGE_MINUTES: int = _env_int("TRADING_MAX_SNAPSHOT_AGE_MINUTES", 30)
 PAPER_CONSERVATIVE_FILLS: bool = _env_bool("TRADING_PAPER_CONSERVATIVE_FILLS", True)
 
 # --- Change 5: Order type ---
-ORDER_TYPE: str = _env_str("TRADING_ORDER_TYPE", "maker")  # "maker" or "taker"
+# FALLBACK ONLY, and it defaults to the conservative side deliberately.
+# The authoritative answer is `execution.allowlist.order_type_for(market_id)`:
+# maker is per-series now, so a single global cannot describe any particular
+# market. This remains as the default argument of `fill_prices` /
+# `calculate_ev` for callers that pass nothing, and it defaults to "taker" so
+# that forgetting to pass resolves to crossing the spread rather than to
+# assuming a fill nobody has evidence for.
+ORDER_TYPE: str = _env_str("TRADING_ORDER_TYPE", "taker")  # "maker" or "taker"
 REQUOTE_SECONDS: int = _env_int("TRADING_REQUOTE_SECONDS", 30)
 
 # --- Change 7: Calibration sample guard ---
@@ -248,6 +255,12 @@ SHADOW_MAKER_ENABLED: bool = _env_bool("TRADING_SHADOW_MAKER_ENABLED", False)
 # Actually resting maker orders. Stays OFF until the simulator is validated
 # against enough recorded book history — see tasks/PHASE_3_DESIGN.md §5.
 MAKER_ENABLED: bool = _env_bool("TRADING_MAKER_ENABLED", False)
+
+# Per-series maker allow-list. MUST default to empty: `_env_str` returns the
+# coded default for an empty value (L31), so absent, empty and "maker nowhere"
+# only coincide while this default is "". A non-empty default could not be
+# cleared by emptying the repository variable.
+MAKER_ENABLED_SERIES: str = _env_str("TRADING_MAKER_ENABLED_SERIES", "")
 
 # Attestation, not a discoverable fact: Open-Meteo's free tier is CC-BY-4.0
 # NON-COMMERCIAL. Unset reads as BLOCKED on the maker-enable checklist, so the

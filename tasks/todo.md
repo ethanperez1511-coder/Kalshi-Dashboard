@@ -1309,11 +1309,45 @@ cycle" identical, which cost a day on 2026-08-17 (L31).
 - per-series day-7 bars computed independently; one series clearing does not
   make another projectable.
 
-## Open questions for approval
-1. Preflight every cycle rather than only at first addition — agreed?
-2. day-7 re-cut to series-level buckets for weather, as the companion change
-   without which the switch is finer than the evidence — agreed?
-3. `PAPER_CONSERVATIVE_FILLS` stays on, so enabling a series changes paper fill
-   pricing not at all until that flag is separately changed. Confirm that is
-   intended: it means enabling a series is observable only in shadow until a
-   further deliberate step.
+## Rulings (all approved 2026-08-18) and build status
+1. Preflight CONTINUOUS while the list is non-empty; any blocker forces maker
+   off for ALL series with a loud error. APPROVED, BUILT.
+2. day-7 re-cut to per-series bars — hours, prints, own rate, own N, each of
+   the seven independently. APPROVED, BUILT.
+3. `PAPER_CONSERVATIVE_FILLS` stays on as the fourth layer; enabling a series
+   is shadow-only until it is separately changed. APPROVED, BUILT — and the
+   two enabled states render differently, per the operator's addition that two
+   config states meaning different things must never look identical (L31).
+
+## Review — landed 2026-08-18
+- `execution/allowlist.py`: `maker_allowed_for` (master AND list),
+  `order_type_for`, `resolve_order_type` (adds the continuous preflight gate),
+  `describe` (three distinct states).
+- Evidence granularity: `scope_for_market` returns `WeatherModel:KXHIGHLAX`
+  etc.; `recorder_health` inherits it through the scope function it already
+  took, so hours and prints stay one population.
+- Single resolution: the scorer resolves once per market and the engine
+  resolves once in `execute` and THREADS it into `_compute_fill_price`.
+  Pricing no longer resolves anything itself — it was briefly given the engine
+  to do so, which both rebuilt the trade 1/50 divergence risk and gave a pure
+  pricing helper a database dependency.
+- `ORDER_TYPE` default flipped "maker" -> "taker". It is now a fallback only;
+  with a per-series list a single global cannot describe any market, so the
+  fallback must be the conservative side. Two live-path tests updated: an
+  unlisted series now prices at the touch, which is the approved default.
+- Visibility every cycle and in the daily digest, including when off.
+
+Tests: 11 allow-list, 8 order-type identity (compared to each other, never to
+a constant), 6 continuous-preflight, 7 per-series day-7. A shared
+`reload_config` fixture restores module state — the first version leaked a
+flipped MAKER_ENABLED into unrelated engine tests, which only showed up in the
+full-suite run.
+
+Full suite 1002 passed.
+
+## Still human-gated, unchanged
+- Adding any series to `TRADING_MAKER_ENABLED_SERIES`.
+- `TRADING_MAKER_ENABLED` itself.
+- `PAPER_CONSERVATIVE_FILLS`, the step that makes an enabled series price paper
+  fills rather than only shadow.
+- Live mode and the 50-trade gate.

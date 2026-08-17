@@ -9,6 +9,7 @@ from sqlalchemy import Engine, func, select
 from src.config import Settings
 from src.database import get_session
 from src.ev.calculator import calculate_ev
+from src.execution.allowlist import resolve_order_type
 from src.ev.filter import TradeFilter
 from src.ev.funnel import ScoreFunnel
 from src.modeling.base import MODEL_TYPE_INDEPENDENT, MODEL_TYPE_PRICE_DERIVED
@@ -237,11 +238,17 @@ def score_all_markets(
             continue
 
         # --- Step 4: calculate EV ---
+        # Resolved ONCE per market and threaded to execution on the
+        # Opportunity row. Two independent reads of the order type for one
+        # market is exactly how trade 1/50 was evaluated at 91c and filled at
+        # 92c, either side of the 0.03 gate it passed on.
+        order_type = resolve_order_type(engine, market_id)
         ev_result = calculate_ev(
             p_model=model_result.p_model,
             price_cents=last_price,
             yes_bid=yes_bid,
             yes_ask=yes_ask,
+            order_type=order_type,
         )
 
         # --- Step 6: run TradeFilter (hours_to_expiry/spread computed above) ---

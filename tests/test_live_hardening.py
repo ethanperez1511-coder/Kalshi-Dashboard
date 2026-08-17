@@ -130,7 +130,8 @@ class TestLiveOrderPricing:
         engine = TradeEngine(db_engine, kalshi_client=client)
         engine._fill_timeout = 10
 
-        # NO trade; book yes_bid=48 / yes_ask=52. Maker NO price = 100-52+1 = 49.
+        # NO trade; book yes_bid=48 / yes_ask=52. An unlisted series is TAKER
+        # since per-series maker landed, so NO pays 100 - yes_bid = 52.
         result = engine.execute(
             decision=_make_decision(side="no", price=51, qty=3),
             market_id="TEST-MKT",
@@ -139,15 +140,18 @@ class TestLiveOrderPricing:
             yes_bid=48, yes_ask=52,
         )
         assert result["status"] == "filled"
-        assert client.place_order.call_args.kwargs["price_cents"] == 49
+        # 52, not 49: an unlisted series is taker, so the live order prices at
+        # the touch rather than one cent inside. Per-series maker made the
+        # global "maker" default meaningless, and the fallback is now taker.
+        assert client.place_order.call_args.kwargs["price_cents"] == 52
         assert client.place_order.call_args.kwargs["side"] == "no"
 
         with get_session(db_engine) as session:
             pos = session.query(Position).filter_by(market_id="TEST-MKT").one()
             assert pos.side == "no"
-            assert pos.entry_price == 49  # side-cost terms
+            assert pos.entry_price == 52  # side-cost terms, taker price
             trade = session.query(Trade).filter_by(market_id="TEST-MKT").one()
-            assert trade.price == 49
+            assert trade.price == 52
             settings = session.query(TradingSettings).first()
             # SUPERSEDED 2026-08-11 (Phase 1.5). This asserted the live path
             # debited the fill cost here. It no longer does: bankroll is an

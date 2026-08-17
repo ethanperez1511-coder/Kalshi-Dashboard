@@ -83,7 +83,23 @@ def scope_for_market(market_id: str, category: str) -> str:
         for m in _REGISTRY.get_models_for(category or "", market_id or "")
         if not isinstance(m, ConsensusModel)
     ]
-    return claiming[0] if claiming else "unclaimed"
+    if not claiming:
+        return "unclaimed"
+
+    model = claiming[0]
+
+    # A model whose scope IS a series map is split by series, because the
+    # maker allow-list is per series and the evidence must never be coarser
+    # than the switch. LAX carries 59% of the weather tape; a model-level pass
+    # would license Denver on Los Angeles's liquidity, which is the same
+    # failure as validating weather on Kalshi's "General" bucket, one layer
+    # further down.
+    from src.weather.stations import station_for_market
+
+    station = station_for_market(market_id or "")
+    if station is not None:
+        return f"{model}:{station.series_ticker}"
+    return model
 
 
 def _series_of(market_id: str) -> str:

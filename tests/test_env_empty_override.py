@@ -26,13 +26,9 @@ import pytest
 
 
 @pytest.fixture
-def config(monkeypatch):
+def config(reload_config):
     def _load(**env):
-        for key, value in env.items():
-            monkeypatch.setenv(key, value)
-        import src.trading_config as module
-
-        return importlib.reload(module)
+        return reload_config(**env)
 
     return _load
 

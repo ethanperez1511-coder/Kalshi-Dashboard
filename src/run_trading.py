@@ -34,6 +34,7 @@ from src.weather.digest import format_weather_digest, weather_digest
 from src.recorder.health import format_recorder_health, recorder_health
 from decimal import Decimal
 
+from src.execution.allowlist import describe as describe_maker
 from src.execution.shadow import format_report as format_shadow, report_by_category
 from src.digest_health import record_section
 from src.db_growth import format_growth, growth, record_sample
@@ -354,6 +355,11 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
         logger.warning("Market expiry sweep failed (non-fatal)", exc_info=True)
 
     # Step 1: Score all markets
+    # Printed every cycle, on or off. A control that reports only when it is
+    # doing something makes "off" and "did nothing this time" identical — that
+    # cost a day on 2026-08-17 (L31).
+    logger.info(describe_maker())
+
     logger.info("=== Scoring markets ===")
     score_deadline = Deadline(SCORE_BUDGET_SECONDS, "scoring")
     funnel = ScoreFunnel()
@@ -434,6 +440,10 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
                 # construction, so a single figure would launder that bias
                 # into a verdict.
                 _section("🪞 Shadow", lambda: format_shadow(report_by_category(engine))),
+                # Stated every day including when nothing is enabled, and the
+                # two enabled states are named apart: a series on the list is
+                # shadow-only while PAPER_CONSERVATIVE_FILLS is on.
+                _section("⚙️ Maker", describe_maker),
                 # A level is not a warning: 376 MB is fine on a database that
                 # has been 370 MB for a month and an emergency on one that was
                 # 200 MB on Friday. The rate is what would have shown the

@@ -63,7 +63,7 @@ def _prints(engine, market_id, n, hours=30, price="0.42"):
 
 class TestScopeIsTheClaimingModel:
     def test_a_weather_ticker_scopes_to_the_weather_model(self):
-        assert scope_for_market("KXHIGHNY-26AUG18-T90", "General") == "WeatherModel"
+        assert scope_for_market("KXHIGHNY-26AUG18-T90", "General") == "WeatherModel:KXHIGHNY"
 
     def test_kalshis_general_label_does_not_decide(self):
         """The whole point: two markets Kalshi calls "General" land in
@@ -71,7 +71,7 @@ class TestScopeIsTheClaimingModel:
         weather = scope_for_market("KXHIGHCHI-26AUG18-T85", "General")
         other = scope_for_market("KXJUNK-26AUG18-A", "General")
 
-        assert weather == "WeatherModel"
+        assert weather == "WeatherModel:KXHIGHCHI"
         assert weather != other
 
     def test_a_general_non_weather_market_goes_to_its_own_claimant(self):
@@ -82,14 +82,17 @@ class TestScopeIsTheClaimingModel:
     def test_a_market_nothing_claims_is_named_unclaimed(self):
         assert scope_for_market("KXJUNK-26AUG18-A", "Nonsense") == "unclaimed"
 
-    def test_every_weather_series_scopes_together(self):
+    def test_every_weather_series_is_its_own_bucket(self):
         from src.weather.stations import STATIONS
 
+        # Every weather series claims through the same model, and each is its
+        # own bucket: the allow-list is per series, so the evidence is too.
         scopes = {
             scope_for_market(f"{series}-26AUG18-T90", "General")
             for series in STATIONS
         }
-        assert scopes == {"WeatherModel"}
+        assert all(s.startswith("WeatherModel:") for s in scopes)
+        assert len(scopes) == len(STATIONS)
 
 
 class TestTheSplitIsReported:
@@ -101,9 +104,9 @@ class TestTheSplitIsReported:
 
         results = measure(engine)
 
-        assert "WeatherModel" in results
+        assert "WeatherModel:KXHIGHNY" in results
         assert "PolymarketModel" in results
-        assert results["WeatherModel"]["prints"] == 300
+        assert results["WeatherModel:KXHIGHNY"]["prints"] == 300
 
     def test_hours_are_counted_per_scope_too(self, engine):
         """Hours and prints must describe the same bucket, or the rate is a
@@ -113,20 +116,20 @@ class TestTheSplitIsReported:
 
         results = measure(engine)
 
-        assert results["WeatherModel"]["hours_recorded"] == 30
+        assert results["WeatherModel:KXHIGHNY"]["hours_recorded"] == 30
 
-    def test_weather_series_detail_is_carried(self, engine):
-        """One model, seven cities with different depth. The gate is per model;
-        the per-series counts are shown so a single city cannot hide."""
+    def test_each_city_is_measured_on_its_own(self, engine):
+        """Seven cities with different depth, seven bars. A deep city must not
+        carry a thin one — that is the allow-list's granularity."""
         _market(engine, "KXHIGHNY-26AUG18-T90")
         _market(engine, "KXHIGHMIA-26AUG18-T97")
         _prints(engine, "KXHIGHNY-26AUG18-T90", 250)
         _prints(engine, "KXHIGHMIA-26AUG18-T97", 10)
 
-        detail = measure(engine)["WeatherModel"]["by_series"]
+        results = measure(engine)
 
-        assert detail["KXHIGHNY"] == 250
-        assert detail["KXHIGHMIA"] == 10
+        assert results["WeatherModel:KXHIGHNY"]["prints"] == 250
+        assert results["WeatherModel:KXHIGHMIA"]["prints"] == 10
 
 
 class TestProbeRateIsRetired:
@@ -136,7 +139,7 @@ class TestProbeRateIsRetired:
         _market(engine, "KXHIGHNY-26AUG18-T90")
         _prints(engine, "KXHIGHNY-26AUG18-T90", 50)
 
-        stats = measure(engine)["WeatherModel"]
+        stats = measure(engine)["WeatherModel:KXHIGHNY"]
 
         assert stats["multi_level_rate"] is None
         assert stats["rate_source"] == "UNMEASURED"
@@ -147,7 +150,7 @@ class TestProbeRateIsRetired:
         _market(engine, "KXHIGHNY-26AUG18-T90")
         _prints(engine, "KXHIGHNY-26AUG18-T90", 300)
 
-        stats = measure(engine)["WeatherModel"]
+        stats = measure(engine)["WeatherModel:KXHIGHNY"]
 
         assert stats["rate_source"] == "MEASURED"
         assert stats["multi_level_rate"] is not None
@@ -161,7 +164,7 @@ class TestProbeRateIsRetired:
 
         results = measure(engine)
 
-        assert results["WeatherModel"]["multi_level_rate"] is not None
+        assert results["WeatherModel:KXHIGHNY"]["multi_level_rate"] is not None
         assert results["PolymarketModel"]["multi_level_rate"] is None
 
     def test_the_constant_is_gone_from_the_module(self):
