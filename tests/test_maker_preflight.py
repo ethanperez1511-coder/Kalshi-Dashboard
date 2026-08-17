@@ -177,13 +177,17 @@ class TestDay7Labelling:
             ))
             s.commit()
 
-    def test_thin_data_is_labelled_carried_not_measured(self, engine):
+    def test_thin_data_gets_no_rate_at_all(self, engine):
         """A rate computed from a handful of prints is itself noise, and must
-        not be dressed up as a measurement."""
+        not be dressed up as a measurement — nor replaced by one measured on a
+        different bucket, which is what the retired probe constant did."""
         self._print(engine, "SPORTS-1", 1000, "0.44")
-        stats = measure(engine)["Sports"]
-        assert stats["rate_source"].startswith("CARRIED")
-        assert stats["multi_level_rate"] == 0.10
+        stats = measure(engine)["SportsOddsModel"]
+        # The probe rate was retired 2026-08-17: a bucket below the print
+        # floor gets no rate at all rather than one measured somewhere else,
+        # because borrowing across buckets is the pooling the ruling forbids.
+        assert stats["rate_source"] == "UNMEASURED"
+        assert stats["multi_level_rate"] is None
 
     def test_sufficient_data_is_labelled_measured(self, engine):
         # One sweep per timestamp; every other sweep touches two levels.
@@ -191,7 +195,7 @@ class TestDay7Labelling:
             self._print(engine, "SPORTS-1", 1000 + i, "0.44")
             if i % 2 == 0:
                 self._print(engine, "SPORTS-1", 1000 + i, "0.43")
-        stats = measure(engine)["Sports"]
+        stats = measure(engine)["SportsOddsModel"]
         assert stats["rate_source"] == "MEASURED"
         assert stats["multi_level_rate"] > 0.0
 
@@ -199,13 +203,13 @@ class TestDay7Labelling:
         self._print(engine, "SPORTS-1", 1000, "0.44", category="Sports")
         self._print(engine, "WX-1", 1000, "0.44", category="Climate and Weather")
         stats = measure(engine)
-        assert set(stats) == {"Sports", "Climate and Weather"}
+        assert set(stats) == {"SportsOddsModel", "WeatherModel"}
 
     def test_an_hour_of_data_projects_nothing(self, engine):
         """Caught by this test: one print in one hour extrapolated to a
         viable-looking N. Arithmetic is not evidence."""
         self._print(engine, "WX-1", 1000, "0.44", category="Climate and Weather")
-        stats = measure(engine)["Climate and Weather"]
+        stats = measure(engine)["WeatherModel"]
         assert stats["projectable"] is False
         assert stats["days_to_sample"] is None
         assert stats["recognised_fills_per_day"] is None
@@ -223,18 +227,31 @@ class TestDay7Labelling:
                 close_date=dtm.datetime(2026, 12, 31, tzinfo=dtm.timezone.utc),
                 status="open",
             ))
+            # Enough hours AND enough prints: since the probe rate was retired
+            # a bucket needs its own measured rate before anything projects, so
+            # the hours guard can only be shown non-vacuous alongside prints.
+            seq = 0
             for hour in range(MIN_HOURS_TO_PROJECT + 1):
-                s.add(OrderbookDeltaRaw(
-                    market_ticker="SP-1", msg_type="trade", sid=1, seq=hour,
-                    ts_ms=1000 + hour,
-                    payload=json.dumps({"msg": {
-                        "market_ticker": "SP-1", "ts_ms": 1000 + hour,
-                        "yes_price_dollars": "0.44", "count_fp": "5",
-                        "taker_outcome_side": "no"}}),
-                    received_at=base + dtm.timedelta(hours=hour),
-                ))
+                for k in range(10):
+                    seq += 1
+                    # Pairs share a ts_ms at two different prices: Kalshi
+                    # prints each maker counterparty separately, so one sweep
+                    # through two levels arrives as two prints on one stamp.
+                    # Without that the multi-level rate is 0 and nothing
+                    # projects however many prints there are.
+                    stamp = 1000 + hour * 100 + k // 2
+                    s.add(OrderbookDeltaRaw(
+                        market_ticker="SP-1", msg_type="trade", sid=1, seq=seq,
+                        ts_ms=stamp,
+                        payload=json.dumps({"msg": {
+                            "market_ticker": "SP-1", "ts_ms": stamp,
+                            "yes_price_dollars": "0.44" if k % 2 else "0.43",
+                            "count_fp": "5",
+                            "taker_outcome_side": "no"}}),
+                        received_at=base + dtm.timedelta(hours=hour),
+                    ))
             s.commit()
-        stats = measure(engine)["Sports"]
+        stats = measure(engine)["SportsOddsModel"]
         assert stats["projectable"] is True
         assert stats["days_to_sample"] is not None
 

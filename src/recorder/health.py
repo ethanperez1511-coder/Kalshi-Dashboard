@@ -76,7 +76,18 @@ def is_live(received_at, close_date) -> bool:
     return _aware(received_at) < _aware(close_date)
 
 
-def recorder_health(engine: Engine, now: dt.datetime = None) -> Dict[str, Any]:
+def recorder_health(
+    engine: Engine, now: dt.datetime = None, scope_of=None,
+) -> Dict[str, Any]:
+    """Recorder coverage, bucketed by `scope_of(market_id, category)`.
+
+    The bucketing is injectable because Kalshi's own category is the wrong axis
+    for a validation gate — it returns "General" for every daily temperature
+    contract, which is exactly what made WeatherModel unreachable until
+    dispatch moved to claimed scope. The day-7 measurement passes the claiming
+    model so its hours and its prints describe the same population; a ratio of
+    two different populations is not a rate.
+    """
     now = now or dt.datetime.now(dt.timezone.utc)
 
     with get_session(engine) as session:
@@ -112,6 +123,8 @@ def recorder_health(engine: Engine, now: dt.datetime = None) -> Dict[str, Any]:
             continue
 
         category, close_date = known
+        if scope_of is not None:
+            category = scope_of(ticker, category)
         if not is_live(received, close_date):
             dead += 1
             dead_markets.add(ticker)

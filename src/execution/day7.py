@@ -39,18 +39,55 @@ logger = logging.getLogger(__name__)
 # spreads these contracts quote.
 TARGET_RECOGNISED_FILLS = 200
 
-# From the probe: 121 of 1200 taker events touched 2+ price levels. Liquid
-# markets only. CARRIED until a category measures its own.
-PROBE_MULTI_LEVEL_RATE = 0.10
-
-# Below this many prints a measured rate is itself noise, so the carried one
-# is still the better estimate — and is labelled as carried.
+# Below this many prints a measured rate is itself noise. There is no fallback:
+# the probe rate (0.10, from 121 of 1200 taker events on LIQUID markets) was
+# retired on 2026-08-17. Carrying a rate measured on one bucket into another is
+# the cross-bucket carry the no-pooling ruling exists to forbid — it lets a
+# liquid bucket vouch for a thin one through a constant. A bucket below this
+# floor now gets no rate and no N at all.
 MIN_PRINTS_TO_MEASURE = 200
 
 # Below this many recorded hours, projecting a daily rate is arithmetic, not
 # evidence: one print in one hour extrapolates to a viable-looking N. Emit no
 # verdict rather than a confident-looking number built on nothing.
 MIN_HOURS_TO_PROJECT = 24
+
+
+_REGISTRY = None
+
+
+def scope_for_market(market_id: str, category: str) -> str:
+    """Which model claims this market — the axis validation actually needs.
+
+    NOT Kalshi's category. The first day-7 report put 5,547 prints into one
+    bucket called "General", which is the same label that made WeatherModel
+    unreachable until dispatch moved to claimed scope. A blended bucket cannot
+    support "maker validated for weather" or "for sports"; it supports nothing.
+
+    `ModelRegistry.get_models_for` is imported rather than re-expressed, so the
+    buckets the maker rule is validated over are exactly the buckets it would
+    execute in. The fallback ConsensusModel is excluded deliberately: it claims
+    everything, so counting it would rebuild the single blended bucket under a
+    different name.
+    """
+    global _REGISTRY
+    if _REGISTRY is None:
+        from src.modeling.registry import ModelRegistry
+
+        _REGISTRY = ModelRegistry()
+
+    from src.modeling.models.consensus import ConsensusModel
+
+    claiming = [
+        type(m).__name__
+        for m in _REGISTRY.get_models_for(category or "", market_id or "")
+        if not isinstance(m, ConsensusModel)
+    ]
+    return claiming[0] if claiming else "unclaimed"
+
+
+def _series_of(market_id: str) -> str:
+    return (market_id or "").split("-", 1)[0].upper()
 
 
 def measure(engine: Engine) -> Dict[str, dict]:
@@ -79,10 +116,11 @@ def measure(engine: Engine) -> Dict[str, dict]:
     sweeps: Dict[str, Dict[tuple, set]] = defaultdict(lambda: defaultdict(set))
     prints: Dict[str, int] = defaultdict(int)
     markets: Dict[str, set] = defaultdict(set)
+    by_series: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
     skipped_not_live = 0
 
     for ticker, ts_ms, payload, received_at in rows:
-        category, close_date = facts.get(ticker, (None, None))
+        raw_category, close_date = facts.get(ticker, (None, None))
         # A print recorded after its market closed says nothing about how often
         # OUR markets trade through a resting level — it describes a book that
         # no longer exists. Counting it shortens the day-7 date on a sample
@@ -91,16 +129,19 @@ def measure(engine: Engine) -> Dict[str, dict]:
         if not is_live(received_at, close_date):
             skipped_not_live += 1
             continue
-        category = category or "unknown"
+        category = scope_for_market(ticker, raw_category or "")
         prints[category] += 1
         markets[category].add(ticker)
+        by_series[category][_series_of(ticker)] += 1
         try:
             body = json.loads(payload).get("msg", {})
         except (ValueError, TypeError):
             continue
         sweeps[category][(ticker, ts_ms)].add(str(body.get("yes_price_dollars")))
 
-    health = recorder_health(engine)
+    # Same scope function for the hours, so hours and prints describe one
+    # population. A ratio of two different populations is not a rate.
+    health = recorder_health(engine, scope_of=scope_for_market)
     if skipped_not_live:
         logger.warning(
             "Excluded %d trade prints recorded after their market closed — "
@@ -112,14 +153,14 @@ def measure(engine: Engine) -> Dict[str, dict]:
     for category, count in prints.items():
         groups = sweeps[category]
         multi = sum(1 for levels in groups.values() if len(levels) > 1)
-        enough = count >= MIN_PRINTS_TO_MEASURE
-        rate = (multi / len(groups)) if (groups and enough) else PROBE_MULTI_LEVEL_RATE
+        enough = count >= MIN_PRINTS_TO_MEASURE and bool(groups)
+        rate = (multi / len(groups)) if enough else None
 
         hours = health["per_category"].get(category, {}).get("hours", 0)
         per_hour = (count / hours) if hours else 0.0
-        recognised_per_day = per_hour * 24 * rate
+        recognised_per_day = (per_hour * 24 * rate) if rate is not None else None
 
-        projectable = hours >= MIN_HOURS_TO_PROJECT
+        projectable = hours >= MIN_HOURS_TO_PROJECT and rate is not None
         out[category] = {
             "prints": count,
             "markets": len(markets[category]),
@@ -127,15 +168,17 @@ def measure(engine: Engine) -> Dict[str, dict]:
             "prints_per_hour": round(per_hour, 2),
             "sweeps": len(groups),
             "multi_level_sweeps": multi,
-            "multi_level_rate": round(rate, 4),
-            "rate_source": "MEASURED" if enough else "CARRIED (probe, liquid markets)",
+            "multi_level_rate": round(rate, 4) if rate is not None else None,
+            "rate_source": "MEASURED" if enough else "UNMEASURED",
+            "by_series": dict(by_series[category]),
             "projectable": projectable,
             "recognised_fills_per_day": (
-                round(recognised_per_day, 2) if projectable else None
+                round(recognised_per_day, 2)
+                if projectable and recognised_per_day is not None else None
             ),
             "days_to_sample": (
                 round(TARGET_RECOGNISED_FILLS / recognised_per_day, 1)
-                if projectable and recognised_per_day > 0 else None
+                if projectable and recognised_per_day else None
             ),
         }
     return out
@@ -150,7 +193,9 @@ def clock_start(engine: Engine) -> Optional[dt.datetime]:
 
 
 def format_report(results: Dict[str, dict], start: Optional[dt.datetime]) -> str:
-    lines = ["Day-7 trade-through measurement (per category, never pooled)"]
+    lines = [
+        "Day-7 trade-through measurement (per CLAIMING MODEL, never pooled)"
+    ]
     if start is not None:
         stamp = start if start.tzinfo else start.replace(tzinfo=dt.timezone.utc)
         elapsed = (dt.datetime.now(dt.timezone.utc) - stamp).total_seconds() / 86400.0
@@ -166,13 +211,34 @@ def format_report(results: Dict[str, dict], start: Optional[dt.datetime]) -> str
             f"{stats['hours_recorded']}h across {stats['markets']} markets "
             f"({stats['prints_per_hour']}/h)"
         )
-        lines.append(
-            f"    multi-level rate {stats['multi_level_rate']:.1%} "
-            f"[{stats['rate_source']}] from {stats['multi_level_sweeps']}/"
-            f"{stats['sweeps']} sweeps"
-        )
+        rate = stats["multi_level_rate"]
+        if rate is None:
+            lines.append(
+                f"    multi-level rate UNMEASURED — {stats['prints']} prints "
+                f"< {MIN_PRINTS_TO_MEASURE} floor. No rate is borrowed from "
+                f"another bucket: that would be pooling."
+            )
+        else:
+            lines.append(
+                f"    multi-level rate {rate:.1%} "
+                f"[{stats['rate_source']}] from {stats['multi_level_sweeps']}/"
+                f"{stats['sweeps']} sweeps"
+            )
+        detail = stats.get("by_series") or {}
+        if len(detail) > 1:
+            lines.append(
+                "    by series: "
+                + ", ".join(
+                    f"{series}={count}"
+                    for series, count in sorted(detail.items(), key=lambda kv: -kv[1])
+                )
+            )
         days = stats["days_to_sample"]
-        if not stats["projectable"]:
+        if rate is None:
+            lines.append(
+                f"    VERDICT: no measured rate for this bucket — no N derived."
+            )
+        elif not stats["projectable"]:
             lines.append(
                 f"    VERDICT: only {stats['hours_recorded']}h recorded "
                 f"(need {MIN_HOURS_TO_PROJECT}h) — too little to project from. "
