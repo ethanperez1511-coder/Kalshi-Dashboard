@@ -4,6 +4,7 @@ Supports continuous mode: python -m src.run_trading --loop --interval 300
 """
 from __future__ import annotations
 import argparse
+import datetime as dt
 import logging
 import time
 import signal
@@ -21,11 +22,19 @@ from src.execution.funnel import ExecutionFunnel
 from src.maintenance.expire_markets import expire_closed_markets
 from src.ev.scorer import score_all_markets
 from src.kalshi.client import KalshiClient
-from src.trading_config import INGEST_BUDGET_SECONDS, SCORE_BUDGET_SECONDS
+from src.trading_config import (
+    INGEST_BUDGET_SECONDS,
+    MAKER_REST_SECONDS,
+    SCORE_BUDGET_SECONDS,
+    SHADOW_MAKER_ENABLED,
+)
 from src.ingestion.series_ingest import coverage_from_db
 from src.weather.archive import run_daily_archive
 from src.weather.digest import format_weather_digest, weather_digest
 from src.recorder.health import format_recorder_health, recorder_health
+from decimal import Decimal
+
+from src.execution.shadow import format_report as format_shadow, report_by_category
 from src.digest_health import record_section
 from src.db_growth import format_growth, growth, record_sample
 from src.bankroll_guard import assert_bankroll_workable
@@ -80,6 +89,159 @@ class _Stopwatch:
     def summary(self) -> str:
         parts = " ".join(f"{k} {v:.0f}s" for k, v in self.stages.items())
         return f"timing: {parts} | total {self.total:.0f}s"
+
+
+def _required_edge(confidence: float) -> float:
+    """The edge threshold the filter actually gated on, for this confidence.
+
+    Read from TradeFilter rather than restated, so the walk-up cap can never
+    drift from the threshold that justified the trade — the cap exists to stop
+    execution trading away that exact edge.
+    """
+    from src.ev.filter import TradeFilter
+
+    return TradeFilter._get_edge_threshold(None, confidence)
+
+
+def simulate_shadow_order(engine, **kwargs):
+    """Thin seam over the shadow simulator.
+
+    Module-level and named so the wiring can be asserted from outside. The
+    simulator was fully built, unit-tested and reachable from nothing for the
+    whole of Phase 3; a test that patches this name proves the pipeline calls
+    it, which is the property that was actually missing.
+    """
+    from src.execution.shadow import simulate_order
+
+    return simulate_order(engine, **kwargs)
+
+
+def execute_qualifying(
+    engine, qualifying, alerter, kalshi_client=None, now=None,
+):
+    """Risk-evaluate and execute each qualifying opportunity.
+
+    Extracted from `run_pipeline` so the execution stage can be driven
+    directly. It was previously inline, which meant the only way to exercise
+    it was to run a whole cycle — so nothing did, and the shadow simulator sat
+    wired to nothing.
+
+    Returns (ExecutionFunnel, trades_placed).
+    """
+    # Step 2+3: Risk evaluate and execute each qualifying opportunity
+    rm = RiskManager(engine)
+
+    te = TradeEngine(engine, kalshi_client=kalshi_client)
+    trades_placed = 0
+    # Same instrumentation the scoring stage got, one layer down: six
+    # opportunities qualified and one traded, and the reason for the other five
+    # went to logger.info and nowhere else.
+    exec_funnel = ExecutionFunnel(qualifying=len(qualifying))
+
+    logger.info("=== Evaluating and executing trades ===")
+    for opp in qualifying:
+        ev = EVResult(
+            p_model=opp["p_model"],
+            implied_prob=opp["implied_prob"],
+            edge=opp["edge"],
+            no_edge=-opp["edge"],
+            raw_ev=opp["net_ev"],
+            net_ev=opp["net_ev"],
+            no_ev=-opp["net_ev"],
+            recommended_side=opp["recommended_side"],
+            fee_rate=0.01,
+        )
+
+        decision = rm.evaluate(
+            ev_result=ev,
+            confidence=opp["confidence"],
+            market_id=opp["market_id"],
+            market_category="General",
+        )
+
+        if not decision.approved:
+            logger.info(f"  ✗ {opp['market_id']}: REJECTED — {decision.rejection_reasons}")
+            exec_funnel.record_rejection(decision.rejection_reasons)
+            continue
+
+        result = te.execute(
+            decision=decision,
+            market_id=opp["market_id"],
+            p_model=opp["p_model"],
+            implied_prob=opp["implied_prob"],
+            edge=opp["edge"],
+            net_ev=opp["net_ev"],
+            confidence=opp["confidence"],
+            reasoning=opp.get("reasoning", "auto-scored"),
+            yes_bid=opp.get("yes_bid", 0),
+            yes_ask=opp.get("yes_ask", 0),
+            model_name=opp.get("model_name", ""),
+            traded_edge=opp.get("traded_edge"),
+            evaluated_price=opp.get("evaluated_price"),
+        )
+
+        if not result:
+            # Approved by risk, then produced no trade: an order that did not
+            # fill, a client error, a market that moved. Distinct from a risk
+            # refusal and previously indistinguishable from one.
+            logger.warning(
+                "  ✗ %s: approved but execution returned nothing — %s",
+                opp["market_id"], te.last_refusal or "unspecified",
+            )
+            exec_funnel.record_execution_nothing(te.last_refusal)
+        if result:
+            trades_placed += 1
+            exec_funnel.placed += 1
+            tag = "PAPER" if result.get("is_paper", True) else f"LIVE [{result.get('status', '?')}]"
+            logger.info(
+                f"  ✓ {tag} TRADE: {result['market_id']} "
+                f"{result['side'].upper()} ×{result['quantity']} @ {result['price']}¢ "
+                f"(${result['dollars']:.2f})"
+            )
+            exec_funnel.alerts_attempted += 1
+            if alerter.trade(
+                result["market_id"], result["side"], result["quantity"],
+                result["price"], result["dollars"], result.get("is_paper", True),
+            ):
+                exec_funnel.alerts_delivered += 1
+            else:
+                logger.error(
+                    "Trade alert NOT delivered for %s — the trade is real and "
+                    "the notification is not", result["market_id"],
+                )
+
+            # Shadow only. What a resting maker order WOULD have done against
+            # the recorded tape, measured against the taker price we actually
+            # paid. Writes to `shadow_maker_orders` alone: the 50-trade gate
+            # accrues on the validated taker path and a simulation writing into
+            # the same record would make that gate mean two things at once.
+            #
+            # Default-off, and a failure here is reporting failing, not trading
+            # failing — it must never cost a cycle.
+            if SHADOW_MAKER_ENABLED:
+                try:
+                    simulate_shadow_order(
+                        engine,
+                        market_id=result["market_id"],
+                        side=result["side"],
+                        quantity=Decimal(str(result["quantity"])),
+                        start_price_cents=int(result["price"]),
+                        taker_price_cents=int(result["price"]),
+                        p_model=opp["p_model"],
+                        required_edge=_required_edge(opp["confidence"]),
+                        rest_start_ms=int(
+                            (now or dt.datetime.now(dt.timezone.utc)).timestamp() * 1000
+                        ),
+                        rest_seconds=MAKER_REST_SECONDS,
+                        category=opp.get("category", ""),
+                        model_name=opp.get("model_name", ""),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Shadow maker simulation failed for %s (non-fatal)",
+                        result["market_id"], exc_info=True,
+                    )
+    return exec_funnel, trades_placed
 
 
 def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
@@ -260,6 +422,11 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
                 _section("📦 Deploy", lambda: format_deployment_state(deployment_state(engine))),
                 _section("🌡 Weather", lambda: format_weather_digest(weather_digest(engine))),
                 _section("🎙 Recorder", lambda: format_recorder_health(recorder_health(engine))),
+                # Two floors, per category, never pooled into one PnL number.
+                # The fill rule over-represents adverse selection by
+                # construction, so a single figure would launder that bias
+                # into a verdict.
+                _section("🪞 Shadow", lambda: format_shadow(report_by_category(engine))),
                 # A level is not a warning: 376 MB is fine on a database that
                 # has been 370 MB for a month and an emergency on one that was
                 # 200 MB on Friday. The rate is what would have shown the
@@ -282,87 +449,9 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
         logger.info("No qualifying opportunities — nothing to trade.")
         return
 
-    # Step 2+3: Risk evaluate and execute each qualifying opportunity
-    rm = RiskManager(engine)
-
-    te = TradeEngine(engine, kalshi_client=kalshi_client)
-    trades_placed = 0
-    # Same instrumentation the scoring stage got, one layer down: six
-    # opportunities qualified and one traded, and the reason for the other five
-    # went to logger.info and nowhere else.
-    exec_funnel = ExecutionFunnel(qualifying=len(qualifying))
-
-    logger.info("=== Evaluating and executing trades ===")
-    for opp in qualifying:
-        ev = EVResult(
-            p_model=opp["p_model"],
-            implied_prob=opp["implied_prob"],
-            edge=opp["edge"],
-            no_edge=-opp["edge"],
-            raw_ev=opp["net_ev"],
-            net_ev=opp["net_ev"],
-            no_ev=-opp["net_ev"],
-            recommended_side=opp["recommended_side"],
-            fee_rate=0.01,
-        )
-
-        decision = rm.evaluate(
-            ev_result=ev,
-            confidence=opp["confidence"],
-            market_id=opp["market_id"],
-            market_category="General",
-        )
-
-        if not decision.approved:
-            logger.info(f"  ✗ {opp['market_id']}: REJECTED — {decision.rejection_reasons}")
-            exec_funnel.record_rejection(decision.rejection_reasons)
-            continue
-
-        result = te.execute(
-            decision=decision,
-            market_id=opp["market_id"],
-            p_model=opp["p_model"],
-            implied_prob=opp["implied_prob"],
-            edge=opp["edge"],
-            net_ev=opp["net_ev"],
-            confidence=opp["confidence"],
-            reasoning=opp.get("reasoning", "auto-scored"),
-            yes_bid=opp.get("yes_bid", 0),
-            yes_ask=opp.get("yes_ask", 0),
-            model_name=opp.get("model_name", ""),
-            traded_edge=opp.get("traded_edge"),
-            evaluated_price=opp.get("evaluated_price"),
-        )
-
-        if not result:
-            # Approved by risk, then produced no trade: an order that did not
-            # fill, a client error, a market that moved. Distinct from a risk
-            # refusal and previously indistinguishable from one.
-            logger.warning(
-                "  ✗ %s: approved but execution returned nothing — %s",
-                opp["market_id"], te.last_refusal or "unspecified",
-            )
-            exec_funnel.record_execution_nothing(te.last_refusal)
-        if result:
-            trades_placed += 1
-            exec_funnel.placed += 1
-            tag = "PAPER" if result.get("is_paper", True) else f"LIVE [{result.get('status', '?')}]"
-            logger.info(
-                f"  ✓ {tag} TRADE: {result['market_id']} "
-                f"{result['side'].upper()} ×{result['quantity']} @ {result['price']}¢ "
-                f"(${result['dollars']:.2f})"
-            )
-            exec_funnel.alerts_attempted += 1
-            if alerter.trade(
-                result["market_id"], result["side"], result["quantity"],
-                result["price"], result["dollars"], result.get("is_paper", True),
-            ):
-                exec_funnel.alerts_delivered += 1
-            else:
-                logger.error(
-                    "Trade alert NOT delivered for %s — the trade is real and "
-                    "the notification is not", result["market_id"],
-                )
+    exec_funnel, trades_placed = execute_qualifying(
+        engine, qualifying, alerter, kalshi_client=kalshi_client,
+    )
 
     # Summary
     logger.info("=== Portfolio Summary ===")
