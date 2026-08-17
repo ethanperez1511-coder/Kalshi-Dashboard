@@ -40,6 +40,7 @@ from src.models.price import PriceSnapshot
 from src.weather import mos
 from src.weather.fitting import cell_priceable, guard_paused, load_fit
 from src.weather.sanity import LadderPoint, check_forecast
+from src.weather.settlement_guard import verify_settlement
 from src.weather.stations import station_for_market
 
 logger = logging.getLogger(__name__)
@@ -129,13 +130,13 @@ class WeatherModel(BaseModel):
                     select(
                         Market.market_id, Market.terms_status,
                         Market.strike_direction, Market.strike_value,
-                        Market.series_ticker,
+                        Market.series_ticker, Market.rules,
                     ).where(Market.terms_status == TERMS_PARSED)
                 ).all()
             self._terms_cache = {
                 r[0]: {
                     "terms_status": r[1], "direction": r[2],
-                    "strike": r[3], "series": r[4],
+                    "strike": r[3], "series": r[4], "rules": r[5],
                 }
                 for r in rows
             }
@@ -205,6 +206,28 @@ class WeatherModel(BaseModel):
                 "lead_past" if intended_lead < 1
                 else f"lead_beyond_{MAX_PRICEABLE_LEAD}d"
             ] += 1
+            return None
+
+        # Does this contract still settle where and how we think it does?
+        # Kalshi repointed all seven series on 2026-08-14 and the only thing
+        # that noticed was a CI job, red three days running, while the pricing
+        # path knew nothing. A guard that runs only in CI gates CI.
+        #
+        # Placed AFTER the date checks and before any network call. A contract
+        # already past its target is refused either way, and reporting it as a
+        # settlement problem would bury the real alarm under every expired
+        # ladder rung still sitting in the table. This fires only for contracts
+        # that would otherwise have been priced.
+        settled_ok, settlement_reason = verify_settlement(
+            market_id, terms.get("rules"),
+        )
+        if not settled_ok:
+            logger.error(
+                "Weather: %s NOT PRICED — %s. The contract's settlement "
+                "description no longer matches the mapped station/authority.",
+                market_id, settlement_reason,
+            )
+            self.refusals[settlement_reason] += 1
             return None
 
         # Guard first: one cached DB read per series, and it can veto the whole

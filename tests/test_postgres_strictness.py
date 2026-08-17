@@ -429,7 +429,7 @@ class TestBatchedModelQueries:
         from src.weather.fitting import save_fit
         from src.weather.model import WeatherModel
 
-        from tests.test_weather_model import TODAY, _Mos
+        from tests.test_weather_model import _RULES_TEXT as _SETTLEMENT_RULES, TODAY, _Mos
 
         Base.metadata.create_all(db_engine)
         tickers = [f"KXHIGHNY-26AUG12-T{t}" for t in (80, 85, 90, 95, 100, 105)]
@@ -442,6 +442,10 @@ class TestBatchedModelQueries:
                     status="open", series_ticker="KXHIGHNY",
                     strike_direction="above", strike_value=80.0 + 5 * i,
                     strike_unit="F", terms_status=TERMS_PARSED,
+                    # The settlement guard reads this; a market row without it
+                    # cannot show where it settles and is refused. Production
+                    # always stores rules_primary.
+                    rules=_SETTLEMENT_RULES,
                 ))
                 s.add(PriceSnapshot(market_id=ticker, yes_bid=40, yes_ask=44,
                                     last_price=42, volume=500))

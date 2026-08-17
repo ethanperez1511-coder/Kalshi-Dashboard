@@ -15,6 +15,16 @@ import datetime as dt
 
 import pytest
 
+# Verbatim shape of the live rules text as of 2026-08-14, when Kalshi moved
+# settlement from the NWS Climatological Report to The Weather Company. The
+# CLI product code is what the guard keys on: it names the observing station
+# rather than the distributor, which is why it survived the switch.
+_RULES_TEXT = (
+    "If the maximum temperature recorded at New York City (CLINYC) for "
+    "Aug 12, 2026, is greater than 90 fahrenheit according to The Weather "
+    "Company, then the market resolves to Yes."
+)
+
 from src.database import Base, get_session
 from src.models.market import Market, TERMS_PARSED, TERMS_UNPARSED
 from src.models.price import PriceSnapshot
@@ -54,6 +64,11 @@ def _seed_market(engine, ticker=TICKER, direction="above", strike=90.0,
             status="open", series_ticker=series,
             strike_direction=direction, strike_value=strike,
             strike_unit="F", terms_status=status,
+            # Production always stores rules_primary, and the settlement guard
+            # now refuses any contract that cannot demonstrate where it
+            # settles. Seeding a market without it was never a production
+            # shape; it only passed because nothing checked.
+            rules=_RULES_TEXT,
         ))
         s.add(PriceSnapshot(
             market_id=ticker, yes_bid=bid, yes_ask=ask, last_price=42, volume=500,

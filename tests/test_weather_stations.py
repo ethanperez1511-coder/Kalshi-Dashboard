@@ -69,9 +69,23 @@ class TestAgainstLiveContracts:
     """
 
     @pytest.mark.asyncio
-    async def test_rules_text_still_names_the_mapped_station(self):
+    async def test_rules_text_still_verifies_for_every_series(self):
+        """All seven, reported together.
+
+        The previous version asserted inside the loop, so it aborted on
+        KXHIGHNY and never revealed that Kalshi had repointed ALL SEVEN series
+        on 2026-08-14. Three days of red runs undercounted the blast radius by
+        7x. A guard that stops at the first failure is measuring one series.
+
+        It also asserted the site NAME and the literal phrase "climatological
+        report", both of which the TWC rewording dropped while settling on the
+        same number. The runtime guard is the single source of truth for what
+        counts as verified, so this exercises exactly that — CI and production
+        cannot drift apart into two different definitions.
+        """
         from src.config import Settings
         from src.kalshi.client import KalshiClient
+        from src.weather.settlement_guard import verify_settlement
 
         settings = Settings()
         assert not settings.is_offline_mode, (
@@ -79,16 +93,29 @@ class TestAgainstLiveContracts:
             "a skip: the station guard cannot verify anything without them"
         )
         client = KalshiClient.from_settings(settings)
+        failures = []
+        checked = 0
         try:
-            for ticker, station in STATIONS.items():
+            for ticker in STATIONS:
                 markets = await client.get_series_markets(ticker, max_markets=1)
                 if not markets:
-                    pytest.skip(f"{ticker} has no open markets right now")
-                rules = (markets[0].rules_primary or "").lower()
-                assert station.rules_marker in rules, (
-                    f"{ticker} rules no longer mention {station.rules_marker!r} — "
-                    f"Kalshi may have repointed the series. Rules: {rules[:200]}"
+                    failures.append(f"{ticker}: no open markets to check")
+                    continue
+                checked += 1
+                market = markets[0]
+                ok, reason = verify_settlement(
+                    market.ticker, market.rules_primary or "",
                 )
-                assert "climatological report" in rules
+                if not ok:
+                    failures.append(
+                        f"{ticker}: {reason} — rules: "
+                        f"{(market.rules_primary or '')[:180]}"
+                    )
         finally:
             await client._http.aclose()
+
+        assert checked, "no series had an open market — nothing was verified"
+        assert not failures, (
+            f"{len(failures)} of {len(STATIONS)} series failed settlement "
+            "verification:\n  " + "\n  ".join(failures)
+        )

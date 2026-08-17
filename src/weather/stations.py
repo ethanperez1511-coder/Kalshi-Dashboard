@@ -43,10 +43,23 @@ class Station:
     latitude: float
     longitude: float
     timezone: str      # settlement uses the LOCAL calendar day
-    # A distinctive phrase that must appear in the live rules text. If Kalshi
-    # ever repoints a series at a different station, the guard test fails
-    # instead of the model silently pricing the wrong place.
+    # A distinctive phrase that appeared in the pre-2026-08-14 rules text.
+    # Retained for messages only — it is NOT what the guard asserts any more.
+    # Kalshi's TWC rewording dropped the site names ("Central Park", "Midway")
+    # entirely, so a guard keyed on them would have failed on six of seven
+    # series for a wording change while missing an actual repoint.
     rules_marker: str
+
+    @property
+    def cli_marker(self) -> str:
+        """The token the live rules text must contain: CLINYC, CLIMDW, ...
+
+        Derived from `cli_location` rather than stored, so the marker and the
+        station it identifies cannot drift apart. Vendor-independent by
+        construction, which is why it survived the NWS -> The Weather Company
+        switch: it names the observing station, not the distributor.
+        """
+        return f"CLI{self.cli_location}"
 
 
 STATIONS: Dict[str, Station] = {

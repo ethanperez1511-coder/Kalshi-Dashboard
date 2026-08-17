@@ -21,6 +21,12 @@ from src.models.weather import WeatherCellFit
 from src.weather import mos
 from src.weather.model import WeatherModel
 
+_RULES = (
+    "If the maximum temperature recorded at New York City (CLINYC) is greater "
+    "than 90 fahrenheit according to The Weather Company, then the market "
+    "resolves to Yes."
+)
+
 NOW = dt.datetime(2026, 8, 17, 9, 0, tzinfo=dt.timezone.utc)   # before 12Z lands
 TODAY = NOW.date()
 TARGET = TODAY + dt.timedelta(days=1)
@@ -36,7 +42,7 @@ def engine(db_engine):
             category="General", close_date=NOW + dt.timedelta(days=2),
             status="active", series_ticker="KXHIGHNY",
             strike_direction="above", strike_value=90.0, strike_unit="F",
-            terms_status=TERMS_PARSED,
+            terms_status=TERMS_PARSED, rules=_RULES,
         ))
         session.commit()
     return db_engine
@@ -148,7 +154,7 @@ class TestLeadBoundsAfterFallback:
                 category="General", close_date=NOW + dt.timedelta(days=4),
                 status="active", series_ticker="KXHIGHNY",
                 strike_direction="above", strike_value=90.0, strike_unit="F",
-                terms_status=TERMS_PARSED,
+                terms_status=TERMS_PARSED, rules=_RULES,
             ))
             session.commit()
         _fit(engine, lead_days=5)
