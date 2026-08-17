@@ -592,3 +592,36 @@ deployment. I had told the operator exclusions were "one environment variable,
 not a patch". That was true of the reader and false of the path. A config flag
 the workflow does not pass is not a config flag — there is now a test that
 enumerates the operator-settable ones and asserts each is wired.
+
+## L31 — Empty is not absent. Wiring a variable before it exists can erase a default.
+
+`TRADING_EXCLUDED_SERIES: ${{ vars.TRADING_EXCLUDED_SERIES }}` was added to
+trade.yml before the repository variable existed. GitHub renders an unset
+`vars.X` as an EMPTY STRING, so the environment variable arrived
+present-and-empty, and `os.environ.get(key, default)` returned `""` because the
+key existed. The parlay exclusion list parsed to `[]`, the filter matched
+nothing, and 27,256 market rows landed in one day — post-purge, with the filter
+believed live and the census showing the excluded tokens verbatim.
+
+I wrote the comment that made it invisible: "an unset variable renders as an
+empty string and _env_bool falls through to the coded default, so absence
+changes nothing." True of `_env_bool`, whose membership test rejects `""`.
+False of `_env_str`, which was the reader that mattered. One sentence, asserted
+for two readers, correct for one.
+
+Three rules:
+
+**A config reader must treat empty as absent.** "No override" and "override
+with nothing" are different intentions and only one of them is ever meant.
+Nobody sets a list variable to empty deliberately.
+
+**Wiring a variable into a workflow is a change to production config, not
+plumbing.** It takes effect on the next run whether or not anyone set a value.
+Wire it and set it in the same change, or make the reader safe first.
+
+**A filter must state that it is running, including when it filters nothing.**
+The funnel printed exclusion counts only when there were some, so "no parlays
+in this fetch" and "the filter is disabled" rendered identically — for a day.
+Ingest now logs the active list every cycle and logs at ERROR when it is empty.
+This is the same shape as the shadow section that was invisible until a trade
+placed: silence has to mean exactly one thing.

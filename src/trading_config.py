@@ -35,7 +35,23 @@ def _env_int(key: str, default: int) -> int:
 
 
 def _env_str(key: str, default: str) -> str:
-    return os.environ.get(key, default)
+    """An empty value means ABSENT, not "override with nothing".
+
+    GitHub renders `${{ vars.NOT_SET }}` as an empty string, so the variable
+    arrives PRESENT and EMPTY and `os.environ.get(key, default)` returns "" —
+    the key exists. Measured 2026-08-17: wiring TRADING_EXCLUDED_SERIES into
+    trade.yml before the repository variable existed emptied the parlay
+    exclusion list, and 27,256 market rows landed in a day, post-purge, with
+    the filter believed live.
+
+    `_env_bool`, `_env_int` and `_env_float` were already safe — a membership
+    test and two exceptions reject "" on their own. This was the one reader
+    where empty was indistinguishable from intent, and the gap between "no
+    override" and "override with nothing" is a working default versus none at
+    all. Nobody sets a list variable to empty and means it.
+    """
+    value = os.environ.get(key, "")
+    return value if value.strip() else default
 
 
 # --- Change 2: Parlay leg correlation ---

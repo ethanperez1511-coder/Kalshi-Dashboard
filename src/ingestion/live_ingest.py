@@ -8,7 +8,11 @@ from sqlalchemy import Engine
 
 from src.config import Settings
 from src.deadline import Deadline
-from src.ingestion.exclusions import concentration_warnings, filter_ingestable
+from src.ingestion.exclusions import (
+    EXCLUDED_SERIES,
+    concentration_warnings,
+    filter_ingestable,
+)
 from src.ingestion.market_sync import sync_markets
 from src.ingestion.price_recorder import record_price_snapshots
 from src.ingestion.series_ingest import ingest_series
@@ -31,6 +35,21 @@ async def _fetch_and_sync(
     deadline = deadline or Deadline.none("ingest")
     client = KalshiClient.from_settings(settings)
     try:
+        # Stated every cycle, including when it is empty. A silent filter and
+        # a disabled filter looked identical for a full day: the funnel only
+        # printed exclusion counts when there were some, so zero exclusions
+        # read as "no parlays in this fetch" when it actually meant the list
+        # had been emptied by an unset repository variable.
+        if EXCLUDED_SERIES:
+            logger.info(
+                "Ingest exclusions ACTIVE: %s", ", ".join(sorted(EXCLUDED_SERIES))
+            )
+        else:
+            logger.error(
+                "Ingest exclusions EMPTY — no series filtered. Every parlay "
+                "mint will be persisted. Check TRADING_EXCLUDED_SERIES."
+            )
+
         markets = await client.get_all_markets(max_markets=MARKET_FETCH_CAP)
         if INGEST_EVENT_CATEGORIES and not deadline.expired():
             # Non-sports markets never surface in the capped /markets walk —
