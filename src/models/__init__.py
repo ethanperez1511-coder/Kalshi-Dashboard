@@ -8,6 +8,7 @@ imports this package for that reason.
 """
 from src.models.db_size import DbSizeSample
 from src.models.market import Market
+from src.models.transfer import TransferSample
 from src.models.price import PriceSnapshot
 from src.models.orderbook import OrderbookSnapshot
 from src.models.opportunity import Opportunity
@@ -24,6 +25,7 @@ from src.backtest.models import BacktestRun, BacktestTrade
 __all__ = [
     "DbSizeSample",
     "Market",
+    "TransferSample",
     "PriceSnapshot",
     "OrderbookSnapshot",
     "Opportunity",

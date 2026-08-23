@@ -1,4 +1,5 @@
 from __future__ import annotations
+import hashlib
 import logging
 from typing import List
 from sqlalchemy import Engine, select
@@ -69,6 +70,30 @@ def _terms_fields(km: KalshiMarket) -> dict:
     }
 
 
+def _content_hash(row: dict) -> str:
+    """Digest of every field ingest writes.
+
+    Covers ALL of them deliberately. Kalshi reworded the settlement clause of
+    all seven temperature series on 2026-08-14 and changed nothing else; a
+    comparison that skipped `rules` would have kept serving the old text
+    forever and left the settlement guard verifying a string no longer on the
+    market.
+    """
+    parts = [
+        f"{key}={row.get(key)!r}"
+        for key in sorted(row)
+        if key not in ("id", "content_hash")
+    ]
+    return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()[:32]
+
+
+def _write_rows(session, inserts: List[dict], updates: List[dict]) -> None:
+    if inserts:
+        session.bulk_insert_mappings(Market, inserts)
+    if updates:
+        session.bulk_update_mappings(Market, updates)
+
+
 def sync_markets(
     engine: Engine,
     kalshi_markets: List[KalshiMarket],
@@ -95,15 +120,21 @@ def sync_markets(
 
     tickers = [km.ticker for km in kalshi_markets]
     with get_session(engine) as session:
-        existing_ids = {
-            ticker: row_id
-            for row_id, ticker in session.execute(
-                select(Market.id, Market.market_id).where(Market.market_id.in_(tickers))
+        # The hash comes back with the id, and it is 32 bytes against the ~700
+        # bytes of title+rules it stands in for. Fetching the fields themselves
+        # to decide whether to write them would cost the same transfer as
+        # writing them.
+        existing = {
+            ticker: (row_id, content_hash)
+            for row_id, ticker, content_hash in session.execute(
+                select(Market.id, Market.market_id, Market.content_hash)
+                .where(Market.market_id.in_(tickers))
             ).all()
         }
 
         inserts: List[dict] = []
         updates: List[dict] = []
+        unchanged = 0
         for km in kalshi_markets:
             row = {
                 "market_id": km.ticker,
@@ -116,20 +147,24 @@ def sync_markets(
             }
             if series_ticker:
                 row["series_ticker"] = series_ticker
-            row_id = existing_ids.get(km.ticker)
-            if row_id is None:
+            row["content_hash"] = _content_hash(row)
+            known = existing.get(km.ticker)
+            if known is None:
                 inserts.append(row)
-            else:
-                updates.append({**row, "id": row_id})
+                continue
+            row_id, stored_hash = known
+            if stored_hash == row["content_hash"]:
+                # Identical to what is already stored. Writing it again would
+                # move ~700 bytes to change nothing.
+                unchanged += 1
+                continue
+            updates.append({**row, "id": row_id})
 
-        if inserts:
-            session.bulk_insert_mappings(Market, inserts)
-        if updates:
-            session.bulk_update_mappings(Market, updates)
+        _write_rows(session, inserts, updates)
         session.commit()
 
     logger.info(
-        "Synced %d markets (%d new, %d updated)",
-        len(kalshi_markets), len(inserts), len(updates),
+        "Synced %d markets (%d new, %d changed, %d unchanged and skipped)",
+        len(kalshi_markets), len(inserts), len(updates), unchanged,
     )
     return len(inserts)

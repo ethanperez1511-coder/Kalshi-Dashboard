@@ -34,7 +34,7 @@ from __future__ import annotations
 import datetime as dt
 from typing import Any, Dict, List
 
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, and_, case, func, select
 
 from src.database import get_session
 from src.models.market import Market
@@ -76,6 +76,48 @@ def is_live(received_at, close_date) -> bool:
     return _aware(received_at) < _aware(close_date)
 
 
+def _hour_bucket(engine: Engine, column):
+    """The recorded hour as a string, computed BY THE SERVER.
+
+    Bucketing in SQL is what keeps this bounded: the result set is one row per
+    (market, hour, liveness) instead of one row per message, so the wire cost
+    stops scaling with how long the recorder has been running.
+    """
+    if engine.dialect.name == "postgresql":
+        return func.to_char(column, "YYYY-MM-DD\"T\"HH24")
+    return func.strftime("%Y-%m-%dT%H", column)
+
+
+def recorder_pulse(engine: Engine, now: dt.datetime = None) -> Dict[str, Any]:
+    """Is the recorder alive? Scalar aggregates only — three rows on the wire.
+
+    The per-cycle caller (`deployment_state`) wants liveness, not coverage
+    detail, and coverage detail is what made this expensive: even aggregated,
+    a per-(market, hour) grouping grows with how long the recorder has been
+    running, so a per-cycle call would creep back toward the outage over a
+    month. Coverage stays in `recorder_health`, which runs daily and on
+    dispatch.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    with get_session(engine) as session:
+        total, markets, last = session.execute(
+            select(
+                func.count(OrderbookDeltaRaw.id),
+                func.count(func.distinct(OrderbookDeltaRaw.market_ticker)),
+                func.max(OrderbookDeltaRaw.received_at),
+            )
+        ).one()
+
+    staleness = None
+    if last is not None:
+        staleness = (now - _aware(last)).total_seconds() / 3600.0
+    return {
+        "messages": total or 0,
+        "markets": markets or 0,
+        "hours_since_last_message": staleness,
+    }
+
+
 def recorder_health(
     engine: Engine, now: dt.datetime = None, scope_of=None,
 ) -> Dict[str, Any]:
@@ -87,54 +129,90 @@ def recorder_health(
     dispatch moved to claimed scope. The day-7 measurement passes the claiming
     model so its hours and its prints describe the same population; a ratio of
     two different populations is not a rate.
+
+    AGGREGATED SERVER-SIDE, and that is not an optimisation. This function used
+    to select `(market_ticker, received_at)` for every row so it could classify
+    each one in Python. `deployment_state` calls it once per cycle, so at
+    650,000 rows that was ~39 MB per call and 11.2 GB/day — the single query
+    that exhausted Neon's monthly transfer quota and stopped production on
+    2026-08-23. Rows scanned are free; rows RETURNED are what crosses the wire.
+
+    Liveness is decided in SQL against each market's own close date, so the
+    per-row semantics are unchanged: an hour bucket that straddles a close
+    still splits into a live part and a dead part.
     """
     now = now or dt.datetime.now(dt.timezone.utc)
+
+    hour = _hour_bucket(engine, OrderbookDeltaRaw.received_at).label("hour")
+    # NULL close_date (or no market row at all) is unattributable, never live.
+    is_live_col = case(
+        (
+            and_(
+                Market.close_date.isnot(None),
+                OrderbookDeltaRaw.received_at < Market.close_date,
+            ),
+            1,
+        ),
+        else_=0,
+    ).label("is_live")
 
     with get_session(engine) as session:
         total = session.execute(
             select(func.count(OrderbookDeltaRaw.id))
         ).scalar() or 0
         gaps = session.execute(select(func.count(OrderbookGap.id))).scalar() or 0
-        tickers = [
-            row[0] for row in session.execute(
-                select(OrderbookDeltaRaw.market_ticker).distinct()
-            ).all()
-        ]
-        rows = session.execute(
-            select(OrderbookDeltaRaw.market_ticker, OrderbookDeltaRaw.received_at)
-        ).all()
         last = session.execute(
             select(func.max(OrderbookDeltaRaw.received_at))
         ).scalar()
 
-    facts = _market_facts(engine, tickers)
+        # One row per (market, category, hour, liveness) — bounded by the
+        # number of markets times the hours recorded, not by messages.
+        grouped = session.execute(
+            select(
+                OrderbookDeltaRaw.market_ticker,
+                Market.category,
+                Market.close_date,
+                hour,
+                is_live_col,
+                func.count(OrderbookDeltaRaw.id),
+            )
+            .select_from(OrderbookDeltaRaw)
+            .join(
+                Market,
+                Market.market_id == OrderbookDeltaRaw.market_ticker,
+                isouter=True,
+            )
+            .group_by(
+                OrderbookDeltaRaw.market_ticker, Market.category,
+                Market.close_date, hour, is_live_col,
+            )
+        ).all()
 
-    # Distinct recorded hours per category — the honest measure of coverage,
-    # counted from live rows only.
     hours: Dict[str, set] = {}
     counts: Dict[str, int] = {}
     live = dead = unattributed = 0
     dead_markets: set = set()
+    tickers: set = set()
 
-    for ticker, received in rows:
-        known = facts.get(ticker)
-        if not ticker or known is None or known[1] is None or received is None:
-            unattributed += 1
+    for ticker, category, close_date, bucket, is_live, count in grouped:
+        tickers.add(ticker)
+
+        if not ticker or close_date is None or bucket is None:
+            unattributed += count
             continue
 
-        category, close_date = known
-        if scope_of is not None:
-            category = scope_of(ticker, category)
-        if not is_live(received, close_date):
-            dead += 1
+        if not is_live:
+            dead += count
             dead_markets.add(ticker)
             continue
 
-        live += 1
-        counts[category] = counts.get(category, 0) + 1
-        hours.setdefault(category, set()).add(
-            _aware(received).strftime("%Y-%m-%dT%H")
-        )
+        scope = category or "unknown"
+        if scope_of is not None:
+            scope = scope_of(ticker, category or "unknown")
+
+        live += count
+        counts[scope] = counts.get(scope, 0) + count
+        hours.setdefault(scope, set()).add(bucket)
 
     staleness_hours = None
     if last is not None:

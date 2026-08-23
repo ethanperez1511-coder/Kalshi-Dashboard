@@ -43,6 +43,15 @@ class Market(Base):
     terms_status: Mapped[str] = mapped_column(
         String(12), default=TERMS_NOT_APPLICABLE, server_default=TERMS_NOT_APPLICABLE
     )
+    # Digest of every field ingest writes, so an unchanged market can be
+    # skipped without transferring the fields needed to prove it unchanged.
+    # Rewriting ~2,500 rows of title+rules every five minutes was the second
+    # largest consumer of the transfer quota that stopped production on
+    # 2026-08-23. NULL means "never hashed" — those rows write once, then go
+    # quiet.
+    content_hash: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

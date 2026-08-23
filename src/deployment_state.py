@@ -35,11 +35,15 @@ def deployment_state(engine: Engine) -> Dict[str, Any]:
         fits, priceable = [], 0
 
     try:
-        from src.recorder.health import recorder_health
+        # Pulse, not full coverage. `recorder_health` groups per (market,
+        # hour), which grows with how long the recorder has run — this is
+        # called EVERY cycle, and the unbounded version of it is what exhausted
+        # Neon's transfer quota and stopped production on 2026-08-23.
+        from src.recorder.health import recorder_pulse
 
-        health = recorder_health(engine)
+        health = recorder_pulse(engine)
     except Exception:
-        health = {"messages": 0, "per_category": {}}
+        health = {"messages": 0, "markets": 0, "hours_since_last_message": None}
 
     try:
         from src.maintenance.retention import format_size_line, plan_retention
@@ -62,6 +66,8 @@ def deployment_state(engine: Engine) -> Dict[str, Any]:
         "weather_cells_priceable": priceable,
         "weather_cells_total": len(fits),
         "recorder_messages": health.get("messages", 0),
+        "recorder_markets": health.get("markets", 0),
+        "recorder_stale_hours": health.get("hours_since_last_message"),
         "recorder_hours_by_category": {
             category: stats.get("hours", 0)
             for category, stats in health.get("per_category", {}).items()
@@ -93,9 +99,14 @@ def format_deployment_state(state: Dict[str, Any]) -> str:
         if total else "   weather: no fits — refit has not run"
     )
 
-    hours = state["recorder_hours_by_category"]
     if state["recorder_messages"]:
-        breakdown = ", ".join(f"{c} {h}h" for c, h in sorted(hours.items()))
+        # Coverage hours per category live in the daily 🎙 Recorder section.
+        # Computing them here would put a per-(market, hour) grouping on the
+        # per-cycle path, and that grouping grows with uptime.
+        stale = state.get("recorder_stale_hours")
+        breakdown = f"{state.get('recorder_markets', 0)} markets"
+        if stale is not None:
+            breakdown += f", last msg {stale:.1f}h ago"
         lines.append(f"   recorder: {state['recorder_messages']} msgs — {breakdown}")
     else:
         lines.append("   ⚠️ recorder: no data — N clock has not started")

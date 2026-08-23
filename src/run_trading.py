@@ -38,6 +38,7 @@ from src.execution.allowlist import describe as describe_maker
 from src.execution.shadow import format_report as format_shadow, report_by_category
 from src.digest_health import record_section
 from src.db_growth import format_growth, growth, record_sample
+from src import transfer_meter
 from src.bankroll_guard import assert_bankroll_workable
 from src.legacy_cutoff import mark_legacy_trades, resync_gate_counter
 from src.deployment_state import deployment_state, format_deployment_state
@@ -264,6 +265,11 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     # src.migrate` as its own explicit step before this.
     verify_or_migrate(engine, migrate=settings.MIGRATE_ON_BOOT, context="the trading pipeline")
 
+    # Count what this cycle moves to and from the database. Neon closed every
+    # connection on 2026-08-23 for exceeding a monthly TRANSFER quota that
+    # nothing here had ever measured.
+    transfer_meter.attach(engine)
+
     # Series the ingest refuses to persist, tallied so the filter stays visible.
     ingest_excluded: dict = {}
 
@@ -449,6 +455,11 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
                 # 200 MB on Friday. The rate is what would have shown the
                 # parlay mint days before it became a two-day deadline.
                 _section("💾 Storage", lambda: format_growth(_sample_growth(engine))),
+                # The other resource axis. Storage fills gradually and degrades;
+                # transfer hits 100% and stops everything at once.
+                _section("📡 Transfer", lambda: transfer_meter.format_transfer(
+                    transfer_meter.month_to_date(engine)
+                )),
             ]),
         )
         TradingSettings.record_heartbeat(engine)
@@ -489,6 +500,13 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
         ok=exec_funnel.balances()
         and exec_funnel.alerts_delivered == exec_funnel.alerts_attempted,
     )
+    # Fold this cycle's byte counts into today's row. Never fatal: metering is
+    # reporting, and reporting must not break trading.
+    try:
+        transfer_meter.flush(engine)
+    except Exception:
+        logger.warning("Transfer metering failed (non-fatal)", exc_info=True)
+
     logger.info(f"Bankroll: ${summary['bankroll']:.2f}")
 
     # Milestone alerts

@@ -137,6 +137,14 @@ POLYMARKET_SCAN_LIMIT: int = _env_int("TRADING_POLYMARKET_SCAN_LIMIT", 3000)
 # --- Coverage: event-category ingest ---
 # The raw /markets feed is parlay-dominated; the events feed is the only way
 # to reach Elections/Politics/Economics markets with their true category.
+# --- Transfer: the quota that stopped production on 2026-08-23 ---
+# Neon bills monthly DATA TRANSFER separately from storage, and at 100% it
+# closes every connection — cycles, recorder and live-checks all stop at once.
+# Overridable because the plan is the operator's decision, and reporting
+# against a limit that has silently changed is worse than not reporting.
+TRANSFER_QUOTA_GB: float = _env_float("TRADING_TRANSFER_QUOTA_GB", 5.0)
+TRANSFER_WARN_FRACTION: float = _env_float("TRADING_TRANSFER_WARN_FRACTION", 0.70)
+
 # --- Storage: series the ingest refuses to persist ---
 # Kalshi mints cross-category and multi-game parlay combinations continuously —
 # 123,000 new rows on 2026-08-15 alone, 374k of 376k "open" markets, none of

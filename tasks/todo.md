@@ -1351,3 +1351,115 @@ Full suite 1002 passed.
 - `PAPER_CONSERVATIVE_FILLS`, the step that makes an enabled series price paper
   fills rather than only shadow.
 - Live mode and the 50-trade gate.
+
+---
+
+# Transfer diet (2026-08-23) — production stopped, Neon transfer quota exceeded
+
+Neon closed every connection: cycles, recorder, live-checks all down at once.
+A NEW resource axis. Storage had a growth line; transfer had nothing, and every
+existing test bounded query COUNT while none bounded BYTES.
+
+## The distinction the whole diagnosis turns on
+Rows SCANNED are free — the server does that work. Rows RETURNED cross the
+wire. An aggregate over ten million rows costs one row of transfer; a bare
+projection over ten million rows costs ten million.
+
+## Biggest consumer: found, and it was mine
+`recorder_health` selected `(market_ticker, received_at)` for EVERY row of
+`orderbook_delta_raw` to classify each row live/dead in Python — added in the
+recorder-liveness commit. `deployment_state` calls it once per cycle, OUTSIDE
+the daily-heartbeat block (run_trading.py:382 vs :401).
+
+    650,000 rows x ~60 B  = 39 MB per call
+    x 288 cycles/day      = 11.2 GB/day
+    x 30 days             = 337 GB/month
+
+That single query is ~93% of all transfer and it grew linearly with the tape,
+which is why it detonated now rather than in week one.
+
+## Measured breakdown, per cycle
+    BEFORE                                    AFTER
+    recorder_health   39.0 MB   (93%)         0.000 MB   pulse: 3 scalars
+    sync_markets       1.8 MB   ( 4%)         0.260 MB   hash-check + changed only
+    scorer join        0.6 MB   ( 1%)         0.613 MB   unchanged
+    sync pre-check     0.2 MB                 (folded above)
+    price snapshots    0.1 MB                 0.130 MB   unchanged
+    TOTAL/cycle       41.7 MB                 1.041 MB     -97.5%
+
+    12.0 GB/day  ->  0.36 GB/day      362 GB/month  ->  10.8 GB/month
+
+## Fixed
+- [x] `recorder_health` aggregates SERVER-SIDE. Result is one row per
+      (market, category, hour, liveness) instead of one per message. Liveness
+      is decided in SQL against each market's close_date, so the per-row
+      semantics are unchanged — an hour straddling a close still splits.
+- [x] `recorder_pulse` added for the per-cycle path: count, distinct markets,
+      max(received_at). Three scalars. Even the aggregated health query grows
+      with HOURS RECORDED, so on a per-cycle path it would creep back toward
+      the outage over a month; coverage detail now runs daily and on dispatch.
+- [x] `sync_markets` skips unchanged rows via a `content_hash` column. It was
+      rewriting title+rules for every market every cycle. The hash covers every
+      written field deliberately: Kalshi reworded the settlement clause of all
+      seven temperature series on 2026-08-14 and touched nothing else, and a
+      comparison that skipped `rules` would have served stale text forever.
+      32 bytes fetched to stand in for ~700 bytes written.
+- [x] Transfer meter + `📡 Transfer` digest line, warning at 70%. Month-to-date
+      GB, MB/day, and projected days of headroom.
+- [x] Class-level test: no statement against a growing table may be a bare
+      projection. Covers day7 and db_stats too, not just the query that bit.
+
+## RULING NEEDED — free tier is not viable at 5-minute cadence
+Post-fix is 10.8 GB/month against a 5 GB free tier. The remaining cost is
+almost entirely the cadence, not any one query:
+
+    cycle     GB/month    free tier
+     5 min      10.8       OVER
+    10 min       6.3       OVER
+    15 min       4.8       OK
+    30 min       3.3       OK
+
+Options, in the order I would take them:
+  A. Cycle every 15 min -> 4.8 GB/month, inside the free tier. Costs scoring
+     freshness: a market moving between ticks is seen three ticks later.
+  B. Stay at 5 min on the paid plan. ~11 GB/month is small on any paid tier.
+  C. Split cadence: score every 5 min, ingest markets every 30. Only 8.9
+     GB/month — the scorer join dominates, so this does NOT get under on its
+     own. Not sufficient alone.
+
+My recommendation: (B) if the upgrade is happening anyway, since 5-minute
+scoring is worth more than the saving; (A) if free tier is a hard constraint.
+Not my call — it trades money against scoring freshness.
+
+## UNVERIFIED, and it matters
+I have assumed the 5 GB figure and that Neon bills egress only. If ingress
+counts too, the recorder's 58 MB/day of writes (1.7 GB/month) is included in
+the numbers above; if not, subtract it. `TRADING_TRANSFER_QUOTA_GB` is
+configurable for exactly this reason, and the meter will resolve the question
+empirically within a few days by comparing our number against the console.
+
+## PROPOSAL, NOT BUILT — orderbook_delta_raw compaction
+The tape is 650k+ rows. Note it is a WRITE cost (58 MB/day), not a read cost,
+now that nothing reads it per cycle — so retention helps STORAGE, and only
+payload slimming helps TRANSFER.
+
+  1. Delta payloads are redundant. `OrderbookDeltaRaw` already denormalises
+     market_ticker, sid, seq, side, price_dollars, delta_fp and ts_ms — which
+     is the entire content of a delta message. Storing the raw JSON too roughly
+     doubles the write. Proposal: store payload=NULL for msg_type='delta',
+     keep it for 'trade' and 'snapshot'.
+     Saves ~35 MB/day write, ~1 GB/month, and roughly halves tape growth.
+     COST: the "always re-derivable from the original message" property is
+     given up for deltas specifically. I would want that ruled on explicitly
+     rather than assumed.
+  2. Trade payloads stay. `fill_sim` needs taker_outcome_side, count_fp and
+     is_block_trade, which are not denormalised.
+  3. Expiry: deltas and snapshots older than the shadow window (proposed 7
+     days) are deletable — replay only ever reconstructs recent books. Trade
+     rows stay for the full DELTA_VALIDATION_DAYS=60, since day-7 measures
+     trade-through rates over a rolling window.
+     Steady state under this: ~7 days of deltas + 60 days of trades, roughly
+     150-200k rows instead of unbounded growth.
+
+Wants a ruling before I build it: (1) gives up a stated design property, and
+(3) deletes data that cannot be re-collected.
