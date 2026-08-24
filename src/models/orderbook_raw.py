@@ -45,7 +45,11 @@ class OrderbookDeltaRaw(Base):
     delta_fp: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
     ts_ms: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, default=None)
 
-    payload: Mapped[str] = mapped_column(Text)
+    # Nullable so compaction can drop a delta's raw JSON once it is outside
+    # the replay window. NULL means "compacted", never "was not recorded": the
+    # denormalised columns above carry a delta message's entire content, and
+    # trade/snapshot payloads are never nulled at any age.
+    payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
     )

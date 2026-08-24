@@ -145,6 +145,15 @@ POLYMARKET_SCAN_LIMIT: int = _env_int("TRADING_POLYMARKET_SCAN_LIMIT", 3000)
 TRANSFER_QUOTA_GB: float = _env_float("TRADING_TRANSFER_QUOTA_GB", 5.0)
 TRANSFER_WARN_FRACTION: float = _env_float("TRADING_TRANSFER_WARN_FRACTION", 0.70)
 
+# Neon meters COMPUTE HOURS as a third axis, alongside transfer and storage.
+# Compute scales to zero only while nothing is connected, and the book recorder
+# holds a connection ~55 min of every hour — so it keeps the database awake
+# round-the-clock and dominates this axis. The 5->15 minute cadence change that
+# fixed transfer barely moves it.
+COMPUTE_QUOTA_HOURS: float = _env_float("TRADING_COMPUTE_QUOTA_HOURS", 100.0)
+# Rough active time per pipeline cycle, for the estimate only.
+CYCLE_COMPUTE_MINUTES: float = _env_float("TRADING_CYCLE_COMPUTE_MINUTES", 1.5)
+
 # --- Storage: series the ingest refuses to persist ---
 # Kalshi mints cross-category and multi-game parlay combinations continuously —
 # 123,000 new rows on 2026-08-15 alone, 374k of 376k "open" markets, none of
@@ -219,11 +228,40 @@ SERIES_FETCH_CAP: int = _env_int("TRADING_SERIES_FETCH_CAP", 500)
 def ingest_series_list() -> list:
     return [s.strip() for s in INGEST_SERIES_TICKERS.split(",") if s.strip()]
 
+# An unchanged market is still recorded this often, so the downstream staleness
+# guard (which keys on snapshot AGE) cannot mistake "quiet" for "gone".
+SNAPSHOT_HEARTBEAT_MINUTES: int = _env_int("TRADING_SNAPSHOT_HEARTBEAT_MINUTES", 20)
+
+# --- Cadence: how often the pipeline wakes ---
+# Moved 5 -> 15 minutes on 2026-08-24 to fit Neon's free-tier transfer quota
+# (10.8 GB/month at 5 min against a 5 GB limit; 4.8 GB/month at 15). It also
+# cuts wake-ups from 288/day to 96, which is the other metered axis.
+#
+# This is NOT decoration: the snapshot staleness tolerance below is derived
+# from it, because two constants tuned around a 5-minute interval silently
+# starve the scorer at 15. Anything else that depends on the interval should
+# derive from this rather than restate it.
+#
+# `trade.yml`'s cron must agree, and a test asserts they do.
+CYCLE_MINUTES: int = _env_int("TRADING_CYCLE_MINUTES", 15)
+
 # --- Pre-live hardening: stale data guard ---
 # Never score a market whose latest price snapshot is older than this.
 # A market that stops getting fresh snapshots has closed early or fallen out
 # of the ingest feed — trading on its stale price is trading on fiction.
-MAX_SNAPSHOT_AGE_MINUTES: int = _env_int("TRADING_MAX_SNAPSHOT_AGE_MINUTES", 30)
+# Derived from the cadence, not fixed at 30. The worst case is a market the
+# heartbeat skipped, hit by one missed cycle, with another cycle in progress:
+#
+#     SNAPSHOT_HEARTBEAT_MINUTES + 2 * CYCLE_MINUTES
+#
+# At 5-minute cycles that was 30 and the literal happened to be right. At 15 it
+# is 50, and leaving the literal would have dropped any quiet market out of
+# scoring after a single missed cycle — with no error raised anywhere, because
+# "too old to score" is a filter, not a failure.
+MAX_SNAPSHOT_AGE_MINUTES: int = _env_int(
+    "TRADING_MAX_SNAPSHOT_AGE_MINUTES",
+    _env_int("TRADING_SNAPSHOT_HEARTBEAT_MINUTES", 20) + 2 * CYCLE_MINUTES,
+)
 
 # --- Pre-live hardening: conservative paper fills ---
 # Paper trades fill at taker prices (cross the spread) instead of assuming a
@@ -284,9 +322,6 @@ FORECAST_LICENSING_RESOLVED: bool = _env_bool(
 # source, and both drop only rows nothing downstream reads.
 SNAPSHOT_SKIP_UNTRADED: bool = _env_bool("TRADING_SNAPSHOT_SKIP_UNTRADED", True)
 SNAPSHOT_SKIP_UNCHANGED: bool = _env_bool("TRADING_SNAPSHOT_SKIP_UNCHANGED", True)
-# An unchanged market is still recorded this often, so the downstream staleness
-# guard (which keys on snapshot AGE) cannot mistake "quiet" for "gone".
-SNAPSHOT_HEARTBEAT_MINUTES: int = _env_int("TRADING_SNAPSHOT_HEARTBEAT_MINUTES", 20)
 
 # --- Per-stage time budgets --------------------------------------------
 # The GitHub job cap is 8 minutes and should be the LAST resort, not the

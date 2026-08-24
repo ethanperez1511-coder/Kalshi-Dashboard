@@ -25,7 +25,7 @@ import logging
 import threading
 from typing import Optional
 
-from sqlalchemy import Engine, event, select
+from sqlalchemy import Engine, event, func, select
 
 from src.database import get_session
 from src.models.transfer import TransferSample
@@ -34,7 +34,13 @@ logger = logging.getLogger(__name__)
 
 # Neon's free plan. Overridable because the plan is the operator's decision and
 # this must not silently keep reporting against a limit that has changed.
-from src.trading_config import TRANSFER_QUOTA_GB, TRANSFER_WARN_FRACTION
+from src.trading_config import (
+    COMPUTE_QUOTA_HOURS,
+    CYCLE_COMPUTE_MINUTES,
+    CYCLE_MINUTES,
+    TRANSFER_QUOTA_GB,
+    TRANSFER_WARN_FRACTION,
+)
 
 QUOTA_BYTES = int(TRANSFER_QUOTA_GB * 1_000_000_000)
 
@@ -168,5 +174,71 @@ def format_transfer(data: dict) -> str:
             f"\n   ⚠️ OVER {TRANSFER_WARN_FRACTION:.0%} — about {days_left:.1f} "
             f"days of headroom. At 100% Neon closes every connection and the "
             f"whole system stops."
+        )
+    return line
+
+
+# --------------------------------------------------------------------------
+# Compute hours — the OTHER metered axis, and the one cadence barely moves.
+# --------------------------------------------------------------------------
+
+def compute_estimate(engine: Engine, now: Optional[dt.datetime] = None) -> dict:
+    """Hours the database compute was most likely awake this month.
+
+    Neon meters compute time as well as transfer and storage, and it scales to
+    zero only while nothing is connected. The book recorder holds a connection
+    for ~55 minutes of every hour, so it keeps the compute awake roughly
+    round-the-clock on its own — which makes it the dominant consumer of this
+    axis by a wide margin, and means the 5-to-15-minute cadence change that
+    fixed transfer barely touches it.
+
+    Estimated from OUR schedule rather than measured, because the number Neon
+    bills is not reachable from inside the job. Distinct recorded hours are the
+    honest proxy for "the recorder had a connection open", and they are already
+    counted for the day-7 clock.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    first = now.date().replace(day=1)
+
+    from src.models.orderbook_raw import OrderbookDeltaRaw
+    from src.recorder.health import _hour_bucket
+
+    with get_session(engine) as session:
+        recorder_hours = session.execute(
+            select(func.count(func.distinct(
+                _hour_bucket(engine, OrderbookDeltaRaw.received_at)
+            ))).where(OrderbookDeltaRaw.received_at >= first)
+        ).scalar() or 0
+
+        days = session.execute(
+            select(func.count(TransferSample.id))
+            .where(TransferSample.sampled_on >= first)
+        ).scalar() or 0
+
+    # Cycles add compute only when the recorder is not already holding the
+    # connection open, which on current schedules is most of the time.
+    cycle_hours = days * (1440 / CYCLE_MINUTES) * CYCLE_COMPUTE_MINUTES / 60.0
+    total = max(recorder_hours, 0) + cycle_hours
+
+    return {
+        "recorder_hours": recorder_hours,
+        "cycle_hours": round(cycle_hours, 1),
+        "total_hours": round(total, 1),
+        "quota_hours": COMPUTE_QUOTA_HOURS,
+        "fraction": total / COMPUTE_QUOTA_HOURS if COMPUTE_QUOTA_HOURS else 0.0,
+    }
+
+
+def format_compute(data: dict) -> str:
+    pct = 100.0 * data["fraction"]
+    line = (
+        f"🖥 Compute: ~{data['total_hours']:.0f} h month-to-date "
+        f"({pct:.0f}% of {data['quota_hours']:.0f} h) — "
+        f"recorder {data['recorder_hours']}h + cycles {data['cycle_hours']}h"
+    )
+    if data["fraction"] >= TRANSFER_WARN_FRACTION:
+        line += (
+            "\n   ⚠️ The recorder holds a connection ~55 min/hour, so it keeps "
+            "the compute awake round-the-clock. Cadence does not fix this axis."
         )
     return line

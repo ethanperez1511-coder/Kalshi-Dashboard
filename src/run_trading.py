@@ -460,6 +460,12 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
                 _section("📡 Transfer", lambda: transfer_meter.format_transfer(
                     transfer_meter.month_to_date(engine)
                 )),
+                # Third metered axis. The recorder dominates it and cadence
+                # does not fix it, so it needs its own line rather than being
+                # folded into the transfer number.
+                _section("🖥 Compute", lambda: transfer_meter.format_compute(
+                    transfer_meter.compute_estimate(engine)
+                )),
             ]),
         )
         TradingSettings.record_heartbeat(engine)

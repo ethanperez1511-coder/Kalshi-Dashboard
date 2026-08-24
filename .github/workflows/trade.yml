@@ -5,7 +5,7 @@ name: paper-trade-cycle
 # A failed run emails the repo owner = built-in death alert.
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every 5 min (unlimited minutes on a public repo)
+    - cron: "*/15 * * * *"  # every 15 min — see TRADING_CYCLE_MINUTES
   workflow_dispatch: {}      # manual "Run workflow" button for verification
 
 # One cycle at a time. Never cancel a running cycle mid-trade (would risk a partial
@@ -17,7 +17,7 @@ concurrency:
 jobs:
   cycle:
     runs-on: ubuntu-latest
-    timeout-minutes: 8   # kill a hung cycle so it can't block the next tick forever
+    timeout-minutes: 8   # under the 15-min interval, so a hung cycle cannot queue the next
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

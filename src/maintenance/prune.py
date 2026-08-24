@@ -11,6 +11,11 @@ import sys
 
 from src.config import Settings, require_production_database
 from src.database import get_engine, verify_or_migrate
+from src.maintenance.tape import (
+    compact_tape,
+    format_compaction,
+    plan_compaction,
+)
 from src.maintenance.retention import (
     EMERGENCY_FRACTION,
     apply_retention,
@@ -38,6 +43,20 @@ def main(argv=None) -> int:
     plan = plan_retention(engine) if args.dry_run else apply_retention(engine)
     text = format_plan(plan, applied=not args.dry_run)
     print(text)
+
+    # Tape compaction rides the same schedule. It nulls delta payloads that are
+    # outside the replay window and redundant with their own columns; trade and
+    # snapshot payloads are never touched. Counted in the run summary either
+    # way, because a maintenance step nobody can see is one nobody can trust.
+    try:
+        tape_plan = plan_compaction(engine)
+        executed = None if args.dry_run else compact_tape(engine, tape_plan)
+        tape_text = format_compaction(tape_plan, executed)
+        print("\n" + tape_text)
+        text += "\n\n" + tape_text
+    except Exception:
+        logger.warning("Tape compaction failed (non-fatal)", exc_info=True)
+        text += "\n\nTAPE COMPACTION FAILED — see logs"
 
     # Still over the emergency line after pruning means ingest is outrunning
     # retention, which retention cannot fix by trying harder.
