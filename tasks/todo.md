@@ -1463,3 +1463,121 @@ payload slimming helps TRANSFER.
 
 Wants a ruling before I build it: (1) gives up a stated design property, and
 (3) deletes data that cannot be re-collected.
+
+---
+
+# Build-window probes (2026-08-24) — findings, awaiting rulings
+
+Both are READ-ONLY probes run during the Neon outage. No production writes, no
+ingest or recorder changes.
+
+## 4. WEATHER EXPANSION — 14 new high-temp series verified, ready to stage
+
+Enumerated via `GET /series?category=Climate and Weather` (354 series). **42
+daily CLI-settled temperature series are live**: 21 cities x {high, low}. All
+settle on The Weather Company, all name a `CLI***` code, all pass the existing
+settlement guard's two checks with no guard change needed.
+
+CLI->station mapping was **confirmed empirically** through IEM's CLI product
+database (`json/cli.py?station=<ICAO>`), which returns the AWIPS id and NWS
+station name per ICAO — a one-to-one proof rather than an inference. Three
+airport traps were caught this way, all of the Chicago/Midway kind:
+
+    Dallas       CLIDFW -> DFW, not Love Field
+    Washington   CLIDCA -> National, not Dulles
+    Houston      CLIHOU -> HOBBY, not Bush Intercontinental
+
+**Every one of the 14 new stations verified live, nothing assumed:**
+- MOS (MEX): `latest_forecast_for` returned a forecast for all 14 ICAOs. Zero
+  failures.
+- GHCN: `fetch_daily_max` returned data for all 14.
+- **Settlement cross-validation**, the strongest evidence: implied settlement
+  temperature reconstructed from ~50 settled strike ladders per series and
+  compared against GHCN. **13/14 at 100% bracket match.** Controls KXHIGHNY
+  43/43 and KXHIGHCHI 55/55 validate the method. Houston tested against IAH
+  scored 14/54 versus Hobby's 49/54 — independent confirmation of the mapping.
+
+### RECOMMEND ADDING (12): TSEA TBOS TLV TSFO TDAL TPHX TOKC TDC TSATX TNOLA TATL TMIN
+Pure config — a `Station` row each. No code change. Liquidity is comparable to
+the existing book (THOU 9232, TSEA 8888, TBOS 7364 against KXHIGHAUS 9343).
+
+### RECOMMEND DEFERRING (2)
+- **KXHIGHTHOU (Houston)** — GHCN is not a clean truth series here. Against the
+  NWS CLI product for KHOU over Jul 1-Aug 22: 46/51 identical, **5 days
+  diverged by 2-4 F**, and Kalshi settled on the CLI value. Every other station
+  was 51/51. Fitting sigma on GHCN would calibrate against a series that
+  disagrees with settlement ~10% of the time. Needs an IEM CLI truth feed first.
+- **KXHIGHTSAN (San Diego)** — launched 2026-08-20, 24 settled rows, 1-day
+  volume 38 contracts. Mapping verifies; there is nothing to validate against.
+
+### LOW-TEMP SERIES (21) — code change, not config. NOT recommended yet.
+`truth.fetch_daily_max` hardcodes `dataTypes: "TMAX"`, and `mos.parse_run`
+deliberately skips 12Z valid times BECAUSE they carry the overnight minimum.
+The data exists — MEX 12Z rows confirmed to carry usable minima — but this is a
+predictor and truth-source change, and it doubles the cell count. Separate
+piece of work, separate ruling.
+
+- [ ] RULING: add the 12? Fits cannot be staged until Neon is back — the refit
+      harness writes `weather_cell_fits`. Station rows and the guard-side work
+      can land now; fits run post-Sept-1.
+
+## 5. ECONOMICS MODEL — probe done, and I recommend NOT building it
+
+Data plumbing is unambiguously feasible. Validation is not, on any useful
+timescale, and that is the finding that should drive the decision.
+
+**Sources verified by live fetch:**
+- Cleveland Fed nowcast: three undocumented public JSON endpoints, no key.
+  **155 completed (pre-print nowcast, actual) pairs** for headline and core CPI
+  MoM and YoY, 2013-07 to 2026-07. Per-target-month daily evolution — a genuine
+  vintage archive, better than expected.
+- Atlanta Fed GDPNow: Excel workbook, no key. 1,871 daily vintage rows plus a
+  **60-quarter scored track record** (MAE 0.773pp, RMSE 1.155pp).
+- FRED: API needs a key we do not have; the CSV graph endpoint works without
+  one. ALFRED first-print vintages are gated.
+
+**Kalshi contracts** are well-specified and liquid: KXCPI, KXCPIYOY, KXCPICORE,
+KXPCECORE, KXFED, KXFEDDECISION, KXGDP, KXU3, KXPAYROLLS. They settle on
+exactly the statistics these nowcasts produce. KXGDP settles on the BEA
+**advance** estimate, which is precisely what GDPNow's track record scores
+against.
+
+**Two clocks, and conflating them is the trap:**
+- *Clock 1 — is the forecast skilled vs climatology?* Needs only (predicted
+  probability, outcome). Fully backfillable TODAY: ~155 pairs for CPI clears
+  N>=60 immediately with room to hold out. GDP has 60 total, so it cannot both
+  fit and hold out.
+- *Clock 2 — is there edge against the order book?* Cannot be backfilled at
+  all. Needs settled markets paired with recorded pre-close books, and Kalshi
+  retains only ~2 settled events per series. The corpus starts at zero and
+  accrues at the release cadence:
+
+      CPI / core / YoY   12 obs/yr  ->  5 years to N=60
+      FOMC                8 obs/yr  ->  7.5 years
+      GDP                 4 obs/yr  ->  15 years
+
+  A CPI event's 15-26 strikes are ONE observation, not fifteen — they all
+  resolve off one BLS print and form a monotone ladder. Counting strikes as
+  pairs would inflate N by 15-25x and hand the gate a meaningless number.
+
+**And the prior on Clock 2 is bad.** The Cleveland Fed nowcast is free, public,
+daily, and watched by everyone pricing these contracts; the honest null is that
+KXCPI already embeds it. Clock 1 evidence is not evidence of edge — it is
+evidence about a number the market can also see. Meanwhile the CPI ladders
+quote 5-7 cents wide (KXCPICORE: 24h volume zero across 11 near strikes), and
+the deepest instrument, KXFEDDECISION, is quoted 1 cent wide because it tracks
+fed funds futures that thousands of desks arbitrage.
+
+- [ ] RULING: I recommend NOT building this. It would be the first model in the
+      system that cannot be validated to the standard weather was held to —
+      five years minimum before its own gate could honestly pass. If it is
+      built anyway it should be explicitly labelled unvalidatable-by-design,
+      with a deliberately redesigned gate, rather than quietly inheriting a
+      promotion path it cannot reach.
+      Also noted: `KXPAYROLLS`'s registered settlement_sources URL points at
+      the PPI release, not the Employment Situation. Rules text is correct,
+      Kalshi's metadata is wrong — do not drive ingest off that field.
+
+## 6. Phase 4 sweep harness — NOT started
+Deferred: 4 and 5 consumed the window, and the sweep needs local snapshot
+history that the DB outage makes awkward to assemble honestly.
