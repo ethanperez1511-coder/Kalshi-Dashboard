@@ -92,6 +92,81 @@ STATIONS: Dict[str, Station] = {
         "KXHIGHPHIL", "Philadelphia International Airport", "PHL", "USW00013739",
         "KPHL", 39.8683, -75.2311, "America/New_York", "philadelphia international",
     ),
+    # ---- Added 2026-08-24 -------------------------------------------------
+    # Twelve series verified by settled-ladder reconstruction: the implied
+    # settlement temperature was recovered from ~50 settled strike ladders per
+    # series and compared against GHCN. 12/12 matched at 100%, with KXHIGHNY
+    # (43/43) and KXHIGHCHI (55/55) run as method controls. Every CLI code was
+    # confirmed against IEM's CLI product database, which returns the AWIPS id
+    # and NWS station name per ICAO — a one-to-one proof, not an inference.
+    #
+    # Three are airport traps of exactly the Chicago/Midway kind, and the city
+    # name would have picked the wrong site in each: Dallas settles on DFW and
+    # not Love Field, Washington on National and not Dulles, and Houston — held
+    # back for a different reason below — on Hobby and not Bush.
+    #
+    # NOT ADDED, deliberately:
+    #   KXHIGHTHOU (Houston/Hobby)  GHCN disagreed with the CLI product on 5 of
+    #       51 days by 2-4 F and Kalshi settles on CLI, so a fit against GHCN
+    #       would be calibrated on a series that disagrees with settlement
+    #       about 10% of the time. Needs a CLI truth feed first.
+    #   KXHIGHTSAN (San Diego)      launched 2026-08-20; 24 settled rows and a
+    #       1-day volume of 38 contracts. The mapping verifies and there is
+    #       nothing to validate it against.
+    "KXHIGHTATL": Station(
+        "KXHIGHTATL", "Atlanta", "ATL", "USW00013874",
+        "KATL", 33.6367, -84.4281, "America/New_York", "atlanta",
+    ),
+    "KXHIGHTBOS": Station(
+        "KXHIGHTBOS", "Boston", "BOS", "USW00014739",
+        "KBOS", 42.3606, -71.0097, "America/New_York", "boston",
+    ),
+    "KXHIGHTDAL": Station(
+        # DALLAS/FORT WORTH. Not Love Field.
+        "KXHIGHTDAL", "Dallas", "DFW", "USW00003927",
+        "KDFW", 32.8998, -97.0403, "America/Chicago", "dallas",
+    ),
+    "KXHIGHTDC": Station(
+        # WASHINGTON NATIONAL. Not Dulles.
+        "KXHIGHTDC", "Washington DC", "DCA", "USW00013743",
+        "KDCA", 38.8512, -77.0402, "America/New_York", "washington",
+    ),
+    "KXHIGHTLV": Station(
+        "KXHIGHTLV", "Las Vegas", "LAS", "USW00023169",
+        "KLAS", 36.0840, -115.1537, "America/Los_Angeles", "las vegas",
+    ),
+    "KXHIGHTMIN": Station(
+        "KXHIGHTMIN", "Minneapolis", "MSP", "USW00014922",
+        "KMSP", 44.8848, -93.2223, "America/Chicago", "minneapolis",
+    ),
+    "KXHIGHTNOLA": Station(
+        "KXHIGHTNOLA", "New Orleans", "MSY", "USW00012916",
+        "KMSY", 29.9934, -90.2581, "America/Chicago", "new orleans",
+    ),
+    "KXHIGHTOKC": Station(
+        "KXHIGHTOKC", "Oklahoma City", "OKC", "USW00013967",
+        "KOKC", 35.3931, -97.6007, "America/Chicago", "oklahoma city",
+    ),
+    "KXHIGHTPHX": Station(
+        # America/Phoenix, NOT America/Denver or America/Los_Angeles: Arizona
+        # does not observe daylight saving, so either of those would shift the
+        # settlement day by an hour for half the year — silently, and only in
+        # summer, which is when these contracts matter most.
+        "KXHIGHTPHX", "Phoenix", "PHX", "USW00023183",
+        "KPHX", 33.4343, -112.0116, "America/Phoenix", "phoenix",
+    ),
+    "KXHIGHTSATX": Station(
+        "KXHIGHTSATX", "San Antonio", "SAT", "USW00012921",
+        "KSAT", 29.5337, -98.4698, "America/Chicago", "san antonio",
+    ),
+    "KXHIGHTSEA": Station(
+        "KXHIGHTSEA", "Seattle", "SEA", "USW00024233",
+        "KSEA", 47.4502, -122.3088, "America/Los_Angeles", "seattle",
+    ),
+    "KXHIGHTSFO": Station(
+        "KXHIGHTSFO", "San Francisco", "SFO", "USW00023234",
+        "KSFO", 37.6213, -122.3790, "America/Los_Angeles", "san francisco",
+    ),
 }
 
 

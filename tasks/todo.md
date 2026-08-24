@@ -1581,3 +1581,121 @@ fed funds futures that thousands of desks arbitrage.
 ## 6. Phase 4 sweep harness — NOT started
 Deferred: 4 and 5 consumed the window, and the sweep needs local snapshot
 history that the DB outage makes awkward to assemble honestly.
+
+---
+
+# CLOSED QUESTION — economics model. Ruled 2026-08-24: DO NOT BUILD.
+
+Recorded as closed so a future session does not reopen it on enthusiasm. It
+should only be reopened on the reopening condition at the bottom, which is a
+FACT about the market, not an argument.
+
+## What was verified (all by live fetch, 2026-08-24)
+- Cleveland Fed inflation nowcast: three public JSON endpoints, no API key.
+  **155 completed (pre-print nowcast, actual) pairs** for headline and core CPI,
+  MoM and YoY, 2013-07 to 2026-07. Real vintage archive.
+- Atlanta Fed GDPNow: public Excel workbook, no key. 1,871 daily vintage rows
+  and a **60-quarter scored track record** (MAE 0.773pp, RMSE 1.155pp).
+- FRED: API needs a key we lack; the CSV graph endpoint works. ALFRED
+  first-print vintages are gated.
+- Kalshi contracts are real, liquid and well-specified: KXCPI, KXCPIYOY,
+  KXCPICORE, KXPCECORE, KXFED, KXFEDDECISION, KXGDP, KXU3, KXPAYROLLS. KXGDP
+  settles on the BEA **advance** estimate, which is exactly what GDPNow's track
+  record scores against.
+
+**So the plumbing is not the problem. It works.**
+
+## Why it is closed anyway
+Two clocks, and conflating them is the trap:
+
+- *Skill vs climatology* is backfillable today. ~155 CPI pairs clears N>=60
+  immediately with room to hold out.
+- *Edge vs the order book* cannot be backfilled at all. It needs settled markets
+  paired with recorded pre-close books, and Kalshi retains ~2 settled events per
+  series. The corpus starts at zero and accrues at the release cadence:
+
+      CPI / core / YoY   12 obs/yr  ->   5 years to N=60
+      FOMC                8 obs/yr  ->   7.5 years
+      GDP                 4 obs/yr  ->  15 years
+
+  A CPI event's 15-26 strikes are ONE observation, not fifteen: they all resolve
+  off a single BLS print and form a monotone ladder. Counting strikes as pairs
+  would inflate N by 15-25x and hand the gate a number that means nothing.
+
+And the prior is bad independently of the timescale. The Cleveland Fed nowcast
+is free, public, daily, and watched by everyone pricing these contracts, so the
+honest null is that KXCPI already embeds it. Skill-vs-climatology is not
+evidence of edge — it is evidence about a number the market can also see.
+Meanwhile the CPI ladders quote 5-7 cents wide (KXCPICORE: 24h volume of zero
+across 11 near strikes), and the one deep instrument, KXFEDDECISION, quotes 1
+cent wide precisely because it tracks fed funds futures that thousands of desks
+arbitrage.
+
+Building it would produce the first model here that cannot be validated to the
+standard weather was held to — five years minimum before its own promotion gate
+could honestly pass.
+
+## REOPENING CONDITION
+Kalshi's economics ladders visibly and persistently diverging from the public
+nowcast — i.e. observed evidence that the market is NOT pricing the free input.
+That is a measurement, not an opinion, and it is cheap to check: compare the
+ladder-implied distribution against the Cleveland Fed nowcast on a few consecutive
+prints. Absent that, the answer stays no.
+
+## Incidental finding, worth keeping
+`KXPAYROLLS`'s registered `settlement_sources` URL points at the PPI release,
+not the Employment Situation. The rules text is correct and Kalshi's metadata is
+wrong — never drive an ingest off that field.
+
+---
+
+# PRE-SPEC (not built) — recorder on a liquid-hours schedule
+
+Held for the Sept 1 console numbers, per the ruling. Written now so the decision
+is a trade with costs attached rather than a guess.
+
+## The problem
+Neon meters compute hours and scales to zero only while nothing is connected.
+The recorder holds a connection ~55 min of every hour, so it keeps the database
+awake round-the-clock: **~660 h/month against a 100 h budget**. The 5->15 minute
+cadence change cut cycle compute from ~216 to ~72 h/month, which is real, but
+the recorder alone is ~6.6x over on its own.
+
+## The reframing that makes a cut defensible
+The recorder's job is no longer 24/7 archival. It is recent tape for shadow
+validation on markets that actually trade — the fill simulator reads a rest
+window measured in seconds, and `markets_to_record` already subscribes only to
+live markets we hold or are scoring.
+
+## Proposed shape
+Run the recorder on US waking hours rather than continuously. 13:00-01:00 UTC
+(09:00-21:00 ET) is 12 h/day -> ~360 h/month, still over. 8 h/day -> ~240.
+To reach 100-150 h/month the recorder runs roughly **5-6 h/day**, which means
+choosing WHICH hours, not merely fewer.
+
+## What that costs, stated as evidence and not as hours
+This is the part that makes it a trade:
+
+1. **Shadow orders outside the recorded window become `unproven`, not
+   `unfilled`.** The fill rule already has that third state and excludes it from
+   fill-frequency entirely, so the effect is a smaller sample rather than a
+   biased one — provided the recorded hours are not correlated with fill
+   likelihood. They almost certainly ARE correlated (liquid hours fill more), so
+   the frequency floor would be measured on the most favourable hours of the day
+   and must be labelled as such. That is a real distortion and it points the
+   wrong way: it would make maker capture look better than it is.
+2. **Day-7 coverage hours stop accruing during the gap**, so the 24-hour
+   per-series bar takes proportionally longer in wall-clock time.
+3. **Sequence gaps at every start/stop boundary**, which `replay` correctly
+   refuses to reconstruct across. One extra unusable boundary per day per
+   market.
+
+## The measurement that should decide it
+Before cutting hours, measure the hour-of-day distribution of recognised fills
+in the shadow record. If fills concentrate in a few hours, the cut is nearly
+free and the schedule should track them. If they are uniform, the cut costs
+sample proportionally and the honest options are a paid plan or a smaller
+subscribe list. That query is cheap and needs only data we already record.
+
+- [ ] Sept 1: db_stats -> console-vs-meter for transfer AND compute -> the
+      hour-of-day fill distribution -> then this ruling.

@@ -55,8 +55,12 @@ class TestEmptyMeansAbsent:
         ingesting every temperature series the system trades."""
         module = config(TRADING_INGEST_SERIES_TICKERS="")
 
+        from src.weather.stations import STATIONS
+
         assert "KXHIGHNY" in module.ingest_series_list()
-        assert len(module.ingest_series_list()) == 7
+        # Every mapped series must survive, whatever the map's size — it went
+        # from 7 to 19 on 2026-08-24.
+        assert set(module.ingest_series_list()) >= set(STATIONS)
 
 
 class TestTheOtherReadersWereAlreadySafe:

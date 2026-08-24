@@ -68,14 +68,17 @@ class TestScopeCarriesTheSeries:
         """Only a model whose scope IS a series map gets split by series."""
         assert scope_for_market("KXJUNK-26AUG19-A", "General") == "PolymarketModel"
 
-    def test_all_seven_series_are_distinct_buckets(self):
+    def test_every_series_is_its_own_bucket(self):
+        """Counted against the map rather than a literal: the map grew from 7
+        to 19 on 2026-08-24 and will grow again."""
         from src.weather.stations import STATIONS
 
         scopes = {
             scope_for_market(f"{series}-26AUG19-T90", "General")
             for series in STATIONS
         }
-        assert len(scopes) == len(STATIONS) == 7
+        assert len(scopes) == len(STATIONS)
+        assert len(STATIONS) >= 7
 
 
 class TestBarsAreIndependent:
