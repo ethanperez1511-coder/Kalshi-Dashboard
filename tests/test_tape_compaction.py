@@ -10,8 +10,9 @@ which is the entire content of a delta. Keeping the JSON too roughly doubles
 the write.
 
 But it buys everything INSIDE the window replay and shadow actually read, so
-the carve-out is the whole design: payloads stay full for 14 days and are
-nulled only after. Trade prints keep their payload for the full retention
+the carve-out is the whole design: payloads stay full for COMPACTION_WINDOW_DAYS
+(2 since ruling 2026-10-06 (a); see test_tape_two_day.py) and are nulled only
+after. Trade prints keep their payload for the full retention
 period regardless — `fill_sim` reads taker_outcome_side, count_fp and
 is_block_trade from it, and none of those are denormalised.
 """
@@ -23,7 +24,7 @@ import pytest
 from sqlalchemy import select
 
 from src.database import Base, get_engine, get_session
-from src.maintenance.tape import compact_tape, plan_compaction
+from src.maintenance.tape import COMPACTION_WINDOW_DAYS, compact_tape, plan_compaction
 from src.models.orderbook_raw import OrderbookDeltaRaw
 
 NOW = dt.datetime(2026, 8, 24, 12, 0, tzinfo=dt.timezone.utc)
@@ -59,7 +60,7 @@ class TestTheWindowIsRespected:
     def test_a_delta_inside_the_window_keeps_its_payload(self, engine):
         """Replay and shadow read recent tape. Re-derivability is load-bearing
         exactly here."""
-        _row(engine, "delta", days_ago=3)
+        _row(engine, "delta", days_ago=COMPACTION_WINDOW_DAYS - 0.5)
 
         compact_tape(engine, plan_compaction(engine, now=NOW), now=NOW)
 
@@ -75,7 +76,7 @@ class TestTheWindowIsRespected:
     def test_the_boundary_belongs_to_the_window(self, engine):
         """A row exactly at the edge is kept. Off-by-one here silently costs a
         day of replay."""
-        _row(engine, "delta", days_ago=13.9)
+        _row(engine, "delta", days_ago=COMPACTION_WINDOW_DAYS - 0.1)
 
         compact_tape(engine, plan_compaction(engine, now=NOW), now=NOW)
 
@@ -161,7 +162,7 @@ class TestDryRunAndVisibility:
         _row(engine, "delta", days_ago=30)
         text = format_compaction(plan_compaction(engine, now=NOW))
 
-        assert "14" in text
+        assert f"{COMPACTION_WINDOW_DAYS} days" in text
         assert "trade" in text.lower()
 
 
