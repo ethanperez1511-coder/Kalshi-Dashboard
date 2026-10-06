@@ -11,7 +11,6 @@ from src.database import Base
 if TYPE_CHECKING:
     from sqlalchemy import Engine
 
-HEARTBEAT_INTERVAL_HOURS = 24
 
 
 class TradingSettings(Base):
@@ -68,17 +67,24 @@ class TradingSettings(Base):
         return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
     @classmethod
-    def heartbeat_due(cls, engine: Engine) -> bool:
-        """True if no heartbeat sent yet, or the last one is >= 24h old."""
+    def heartbeat_due(cls, engine: Engine, now: Optional[datetime] = None) -> bool:
+        """True if no heartbeat has been sent on the current UTC date.
+
+        Once per calendar date, not 24 h after the last one. Cycles now run
+        only inside the daily session, and under "24 h since" a heartbeat sent
+        at 20:50 is not due until 20:50 the next day. With no cycle in the
+        last ten minutes of that session it slips to the day after, and a
+        whole day goes unreported.
+        """
         from src.database import get_session
 
+        now = now or datetime.now(timezone.utc)
         with get_session(engine) as session:
             row = session.query(cls).first()
             last = row.last_heartbeat_at if row else None
         if last is None:
             return True
-        age_h = (datetime.now(timezone.utc) - cls._as_utc(last)).total_seconds() / 3600.0
-        return age_h >= HEARTBEAT_INTERVAL_HOURS
+        return cls._as_utc(last).date() < now.astimezone(timezone.utc).date()
 
     @classmethod
     def record_heartbeat(cls, engine: Engine, at: Optional[datetime] = None) -> None:
