@@ -9,6 +9,8 @@
     python -m src.maintenance --retire-sha e807f8dd --confirm RETIRE-DEPLOY-SHA
     python -m src.maintenance --vacuum-full                         # dry run
     python -m src.maintenance --vacuum-full --confirm VACUUM-FULL-TAPE
+    python -m src.maintenance --shrink-tape                         # measure, dry run
+    python -m src.maintenance --shrink-tape --confirm SHRINK-TAPE
 
 The two destructive actions have separate confirmation tokens on purpose. One
 token for two destructive operations means confirming either confirms both.
@@ -55,6 +57,12 @@ from src.maintenance.vacuum_full import (
     format_plan as format_vacuum,
     plan_vacuum,
 )
+from src.maintenance.shrink_tape import (
+    CONFIRM_TOKEN as SHRINK_TOKEN,
+    format_report as format_shrink,
+    measure as measure_tape,
+    shrink as shrink_tape,
+)
 from src.report_guard import publish_report
 from src.run_summary import write_summary
 
@@ -89,6 +97,13 @@ def main(argv=None) -> int:
         ),
     )
     parser.add_argument(
+        "--shrink-tape", action="store_true",
+        help=(
+            "Measure the tape table; with the token, shrink it in place a chunk "
+            f"at a time. Dry run unless --confirm {SHRINK_TOKEN}"
+        ),
+    )
+    parser.add_argument(
         "--db-stats", action="store_true",
         help="Read-only census of table sizes, market statuses and growth rates.",
     )
@@ -107,6 +122,9 @@ def main(argv=None) -> int:
 
     if args.vacuum_full:
         return _vacuum_full(engine, args.confirm.strip())
+
+    if args.shrink_tape:
+        return _shrink_tape(engine, args.confirm.strip())
 
     shas = [s for s in (args.retire_shas or []) if s and s.strip()]
     if shas:
@@ -228,6 +246,36 @@ def _vacuum_full(engine, token: str) -> int:
     )
     write_summary(headline, text[:4000], ok=True)
     return 0
+
+
+def _shrink_tape(engine, token: str) -> int:
+    """Measure the tape; shrink it in place only on the exact token."""
+    if token and token != SHRINK_TOKEN:
+        logger.error(
+            "Confirmation token did not match. Expected %r, got %r. "
+            "Nothing was changed.", SHRINK_TOKEN, token,
+        )
+        write_summary("Shrink tape: BAD CONFIRM TOKEN — nothing changed", ok=False)
+        return 2
+
+    m = measure_tape(engine)
+    result = shrink_tape(engine, m) if (token == SHRINK_TOKEN and m.supported) else None
+    text = format_shrink(m, result)
+    print(text)
+
+    if result is None:
+        return publish_report(
+            f"Shrink tape DRY RUN: tape {m.tape_file / 1e6:.0f} MB file, "
+            f"~{m.live_estimate / 1e6:.0f} MB live",
+            text[:4000], substantive=(not m.supported) or m.rows > 0,
+        )
+    ok = result.refused is None
+    write_summary(
+        f"Shrink tape {'EXECUTED' if ok else 'REFUSED'}: heap "
+        f"{result.heap_before / 1e6:.0f} -> {result.heap_after / 1e6:.0f} MB",
+        text[:4000], ok=ok,
+    )
+    return 0 if ok else 1
 
 
 def _retire(engine, shas, token: str) -> int:
