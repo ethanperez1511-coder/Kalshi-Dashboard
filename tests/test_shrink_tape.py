@@ -208,3 +208,41 @@ class TestShrinkOnPostgres:
 
         assert result.refused and "recorder is writing" in result.refused
         assert _fingerprint(pg) == before
+
+
+@needs_pg
+class TestInstallments:
+    def test_max_chunks_stops_after_exactly_that_many_and_skips_the_reindex(self, pg):
+        _seed_production_shape(pg)
+        before = _fingerprint(pg)
+
+        result = shrink(pg, measure(pg), now=NOW, chunk_rows=2_000, max_chunks=2)
+
+        assert result.rounds == 2 and result.moved == 4_000
+        assert "installment" in result.stopped
+        assert result.reindexed == []
+        assert _fingerprint(pg) == before
+
+    def test_it_reports_our_own_sizes_before_and_after(self, pg):
+        _seed_production_shape(pg)
+        result = shrink(pg, measure(pg), now=NOW, chunk_rows=2_000, max_chunks=2)
+        text = shrink_tape.format_report(measure(pg), result)
+
+        assert result.db_before > 0 and result.tape_before > 0
+        assert result.tape_after <= result.tape_before
+        assert "pg_database_size" in text and "tape table total" in text
+
+
+def test_max_chunks_flag_reaches_the_shrink(seeded, monkeypatch, capsys):
+    """The wiring, through the module as __main__."""
+    import src.maintenance.shrink_tape as st
+
+    seen = {}
+    monkeypatch.setattr(st, "measure", lambda e: TapeMeasure(supported=True))
+    monkeypatch.setattr(st, "shrink", lambda e, m, **kw: seen.update(kw) or st.ShrinkResult())
+    monkeypatch.setattr(st, "format_report", lambda m, r=None, now=None: "report")
+    code, _ = run_module(
+        ["--shrink-tape", "--confirm", CONFIRM_TOKEN, "--max-chunks", "2"],
+        seeded, monkeypatch, capsys,
+    )
+    assert seen.get("max_chunks") == 2, code

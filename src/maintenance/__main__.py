@@ -104,6 +104,10 @@ def main(argv=None) -> int:
         ),
     )
     parser.add_argument(
+        "--max-chunks", type=int, default=None,
+        help="With --shrink-tape: stop after this many chunks (an installment; no reindex).",
+    )
+    parser.add_argument(
         "--db-stats", action="store_true",
         help="Read-only census of table sizes, market statuses and growth rates.",
     )
@@ -124,7 +128,7 @@ def main(argv=None) -> int:
         return _vacuum_full(engine, args.confirm.strip())
 
     if args.shrink_tape:
-        return _shrink_tape(engine, args.confirm.strip())
+        return _shrink_tape(engine, args.confirm.strip(), args.max_chunks)
 
     shas = [s for s in (args.retire_shas or []) if s and s.strip()]
     if shas:
@@ -248,7 +252,7 @@ def _vacuum_full(engine, token: str) -> int:
     return 0
 
 
-def _shrink_tape(engine, token: str) -> int:
+def _shrink_tape(engine, token: str, max_chunks=None) -> int:
     """Measure the tape; shrink it in place only on the exact token."""
     if token and token != SHRINK_TOKEN:
         logger.error(
@@ -259,7 +263,10 @@ def _shrink_tape(engine, token: str) -> int:
         return 2
 
     m = measure_tape(engine)
-    result = shrink_tape(engine, m) if (token == SHRINK_TOKEN and m.supported) else None
+    result = (
+        shrink_tape(engine, m, max_chunks=max_chunks)
+        if (token == SHRINK_TOKEN and m.supported) else None
+    )
     text = format_shrink(m, result)
     print(text)
 

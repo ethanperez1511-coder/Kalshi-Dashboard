@@ -247,6 +247,11 @@ class ShrinkResult:
     reindexed: List[str] = field(default_factory=list)
     reindex_skipped: List[str] = field(default_factory=list)
     stopped: str = ""
+    # Our own before/after numbers, to set beside the Neon console.
+    db_before: int = 0
+    db_after: int = 0
+    tape_before: int = 0
+    tape_after: int = 0
 
 
 _MOVE = text(
@@ -261,6 +266,11 @@ _MOVE = text(
 def _heap(engine: Engine) -> int:
     with engine.connect() as conn:
         return int(conn.execute(text(f"SELECT pg_relation_size('{TABLE}', 'main')")).scalar())
+
+
+def _tape_total(engine: Engine) -> int:
+    with engine.connect() as conn:
+        return int(conn.execute(text(f"SELECT pg_total_relation_size('{TABLE}')")).scalar())
 
 
 def _vacuum(engine: Engine) -> None:
@@ -284,12 +294,22 @@ def shrink(
     now: Optional[dt.datetime] = None,
     chunk_rows: int = CHUNK_ROWS,
     max_rounds: Optional[int] = None,
+    max_chunks: Optional[int] = None,
     _after_delete: Optional[Callable[[object], None]] = None,
 ) -> ShrinkResult:
     """Move tail rows forward a chunk at a time, trimming the file as it
-    empties, then rebuild bloated indexes. Every step is atomic or skipped."""
+    empties, then rebuild bloated indexes. Every step is atomic or skipped.
+
+    `max_chunks` runs an installment: that many chunks and then stop, with
+    NO index rebuild. Rebuilding is for a finished shrink, and an installment
+    exists to measure what each chunk costs (history included) before
+    committing to the rest.
+    """
     now = now or dt.datetime.now(dt.timezone.utc)
-    result = ShrinkResult(heap_before=_heap(engine))
+    result = ShrinkResult(
+        heap_before=_heap(engine), db_before=database_size_bytes(engine),
+        tape_before=_tape_total(engine),
+    )
 
     if m.last_received is not None:
         last = m.last_received
@@ -300,7 +320,8 @@ def shrink(
                 f"recorder is writing (last row {last:%H:%M:%S}Z) — dispatch "
                 f"between recorder runs"
             )
-            result.heap_after = result.heap_before
+            result.heap_after, result.db_after = result.heap_before, result.db_before
+            result.tape_after = result.tape_before
             return result
 
     chunk_bytes = int(chunk_rows * m.bytes_per_row) if m.rows else 0
@@ -308,7 +329,12 @@ def shrink(
     best = result.heap_before
     stalled = 0
 
+    installment = False
     while result.rounds < max_rounds:
+        if max_chunks is not None and result.rounds >= max_chunks:
+            result.stopped = f"installment: {max_chunks} chunk(s) as requested"
+            installment = True
+            break
         refusal = guard_refusal(database_size_bytes(engine), chunk_bytes)
         if refusal:
             result.stopped = f"space guard: {refusal}"
@@ -337,7 +363,10 @@ def shrink(
         result.stopped = f"round limit {max_rounds}"
 
     result.heap_after = _heap(engine)
-    _reindex(engine, m, result)
+    if not installment:
+        _reindex(engine, m, result)
+    result.db_after = database_size_bytes(engine)
+    result.tape_after = _tape_total(engine)
     return result
 
 
@@ -448,7 +477,9 @@ def format_report(m: TapeMeasure, result: Optional[ShrinkResult] = None,
             lines.append(f"    REFUSED: {result.refused}")
         lines += [
             f"    rounds {result.rounds}, rows moved {result.moved:,}",
-            f"    heap {result.heap_before / MB:.0f} -> {result.heap_after / MB:.0f} MB",
+            f"    pg_database_size  {result.db_before / MB:.1f} -> {result.db_after / MB:.1f} MB",
+            f"    tape table total  {result.tape_before / MB:.1f} -> {result.tape_after / MB:.1f} MB "
+            f"(heap {result.heap_before / MB:.1f} -> {result.heap_after / MB:.1f})",
             f"    stopped: {result.stopped or '-'}",
             f"    reindexed: {', '.join(result.reindexed) or 'none'}",
         ]

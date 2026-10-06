@@ -46,6 +46,10 @@ on:
         type: boolean
         required: false
         default: false
+      max_chunks:
+        description: "With shrink_tape: stop after N chunks of 20,000 rows (an installment, no reindex). Blank = run to completion."
+        required: false
+        default: ""
       retire_sha:
         description: "Deploy SHA to retire from the gate (e.g. e807f8dd). Blank = legacy-position reconcile instead."
         required: false
@@ -80,6 +84,7 @@ jobs:
           PURGE_MARKETS: ${{ inputs.purge_markets }}
           VACUUM_FULL: ${{ inputs.vacuum_full }}
           SHRINK_TAPE: ${{ inputs.shrink_tape }}
+          MAX_CHUNKS: ${{ inputs.max_chunks }}
           RETIRE_SHA: ${{ inputs.retire_sha }}
           CONFIRM: ${{ inputs.confirm }}
         # Inputs go through the environment, never interpolated into the shell
@@ -95,7 +100,11 @@ jobs:
           elif [ "$VACUUM_FULL" = "true" ]; then
             python -m src.maintenance --vacuum-full --confirm "$CONFIRM"
           elif [ "$SHRINK_TAPE" = "true" ]; then
-            python -m src.maintenance --shrink-tape --confirm "$CONFIRM"
+            if [ -n "$MAX_CHUNKS" ]; then
+              python -m src.maintenance --shrink-tape --confirm "$CONFIRM" --max-chunks "$MAX_CHUNKS"
+            else
+              python -m src.maintenance --shrink-tape --confirm "$CONFIRM"
+            fi
           elif [ -n "$RETIRE_SHA" ]; then
             python -m src.maintenance --retire-sha "$RETIRE_SHA" --confirm "$CONFIRM"
           else
