@@ -29,6 +29,7 @@ class ExecutionFunnel:
     qualifying: int = 0
 
     # Terminal buckets, mutually exclusive and exhaustive.
+    fee_refused: int = 0
     risk_rejected: int = 0
     execution_returned_nothing: int = 0
     placed: int = 0
@@ -42,6 +43,11 @@ class ExecutionFunnel:
     # qualifying opportunity in a cycle, which is exactly the uninterrogable
     # number the funnels exist to abolish.
     execution_reasons: Counter = field(default_factory=Counter)
+
+    # Refused before risk: no fee schedule we can vouch for, or the edge does
+    # not survive the series' true fee. Not a risk decision, so not counted
+    # as one.
+    fee_reasons: Counter = field(default_factory=Counter)
 
     # What the shadow maker simulator did, per outcome. Reported per CYCLE and
     # not only in the daily digest: the first cycles after the flag was set
@@ -64,6 +70,10 @@ class ExecutionFunnel:
             # and the counter never aggregates.
             self.rejection_reasons[_reason_key(reason)] += 1
 
+    def record_fee_refusal(self, reason: str) -> None:
+        self.fee_refused += 1
+        self.fee_reasons[_reason_key(reason)] += 1
+
     def record_shadow(self, status: str) -> None:
         self.shadow_outcomes[status or "unknown"] += 1
 
@@ -73,7 +83,8 @@ class ExecutionFunnel:
 
     def attributed(self) -> int:
         return (
-            self.risk_rejected
+            self.fee_refused
+            + self.risk_rejected
             + self.execution_returned_nothing
             + self.placed
         )
@@ -84,6 +95,7 @@ class ExecutionFunnel:
     def format(self) -> str:
         lines = [
             f"qualifying                  {self.qualifying:>6}",
+            f"  - fee refused             {self.fee_refused:>6}",
             f"  - risk rejected           {self.risk_rejected:>6}",
             f"  - execution returned none {self.execution_returned_nothing:>6}",
             f"  = PLACED                  {self.placed:>6}",
@@ -93,6 +105,8 @@ class ExecutionFunnel:
                 f"  !! UNATTRIBUTED           {self.qualifying - self.attributed():>6}"
                 "   (a rejection path is uncounted)"
             )
+        for reason, n in self.fee_reasons.most_common():
+            lines.append(f"    {reason}: {n}")
         for reason, n in self.rejection_reasons.most_common():
             lines.append(f"    {reason}: {n}")
         for reason, n in self.execution_reasons.most_common():

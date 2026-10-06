@@ -20,6 +20,7 @@ from src.models.match_map import MarketMatchMap
 from src.models.weather import ForecastArchive, GuardState, WeatherCellFit
 from src.models.orderbook_raw import OrderbookDeltaRaw, OrderbookGap
 from src.models.shadow import ShadowMakerOrder
+from src.models.fees import SeriesFee
 from src.backtest.models import BacktestRun, BacktestTrade
 
 __all__ = [
@@ -38,6 +39,7 @@ __all__ = [
     "ForecastArchive",
     "GuardState",
     "OrderbookDeltaRaw",
+    "SeriesFee",
     "OrderbookGap",
     "ShadowMakerOrder",
     "WeatherCellFit",

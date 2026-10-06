@@ -163,6 +163,7 @@ class TradeEngine:
         model_name: str = "",
         traded_edge: Optional[float] = None,
         evaluated_price: Optional[int] = None,
+        fee_rate: Optional[float] = None,
     ) -> Optional[Dict[str, Any]]:
         # A stale reason carried into the next opportunity is worse than none.
         self.last_refusal = None
@@ -213,7 +214,7 @@ class TradeEngine:
             return self._execute_paper(
                 decision, market_id, p_model, implied_prob,
                 edge, net_ev, confidence, reasoning, fill_price, model_name,
-                traded_edge,
+                traded_edge, fee_rate=fee_rate,
             )
         else:
             if self._client is None:
@@ -242,6 +243,7 @@ class TradeEngine:
         fill_price: int = 0,
         model_name: str = "",
         traded_edge: Optional[float] = None,
+        fee_rate: Optional[float] = None,
     ) -> Dict[str, Any]:
         actual_price = fill_price if fill_price > 0 else decision.price_cents
         with get_session(self._engine) as session:
@@ -265,7 +267,11 @@ class TradeEngine:
                 # Paper pays no real fee, so record the simulated Kalshi fee now.
                 # Settlement consumes this field for both paths, which is what
                 # makes paper and live PnL directly comparable.
-                entry_fee=kalshi_fee(decision.quantity, actual_price),
+                # At the series' own rate when the fee schedule supplied one.
+                entry_fee=(
+                    kalshi_fee(decision.quantity, actual_price, fee_rate)
+                    if fee_rate is not None else kalshi_fee(decision.quantity, actual_price)
+                ),
                 entry_fee_source="simulated",
                 model_name=model_name or None,
                 deploy_sha=current_deploy_sha(),
