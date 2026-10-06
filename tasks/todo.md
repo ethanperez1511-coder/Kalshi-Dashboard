@@ -1699,3 +1699,224 @@ subscribe list. That query is cheap and needs only data we already record.
 
 - [ ] Sept 1: db_stats -> console-vs-meter for transfer AND compute -> the
       hour-of-day fill distribution -> then this ruling.
+
+---
+
+# RE-ENTRY 2026-10-06 — diagnosis of the four problems, then the priority-reset plan
+
+Evidence sources: the public GitHub Actions API (run and step outcomes and
+annotations; logs need auth and were NOT read), code reading, Neon docs, and
+1,149,876 public Kalshi trade prints (19 weather series, Sep 22–Oct 5).
+
+## D0. Finding above all four: the scheduler, not the bot, sets the cadence
+GitHub cron has delivered ~5–8 runs/day since Aug 27, against 96 nominal
+(trade, */15) and 24 nominal (recorder, hourly). Runs start 4–8 h late (the
+retention cron at 04:25 runs 09:00–11:00). Recorder coverage is ~25% of the
+day, in random slots. "Recorder silent 4.5 h" = runs at 04:34 and then 11:43:
+GitHub's scheduling gap, not an incident.
+
+## D1. Storage
+- **Sep 11 → Oct 1: Neon storage cap reached, writes refused, reads fine.**
+  Proof by step: in the failed trade runs, `Apply pending schema migrations`
+  (which connects and reads) went GREEN and `Run one paper-trading cycle` went
+  red. The recorder connected, ran 55 min, then failed. A compute suspension
+  refuses the connection itself, so this was the storage cap. The cleanup
+  deadlocked exactly as feared: Neon docs say inserts, updates AND deletes
+  fail while over the cap. The bot was dark for 20 days.
+- **Recovery on Oct 1 between 15:57 and 19:06 UTC** came from Neon raising
+  the Free cap from 0.5 GB to 1 GB (changelog dated 2026-10-02: "existing
+  projects pick up the new limit automatically"). Nothing we did freed space.
+- **Today's red retention (Oct 2–6) is very likely our own exit code, not
+  Neon.** `prune.py` returns 1 whenever size ≥ 90% of `TIER_LIMIT_BYTES`,
+  which is still hardcoded to 512 MiB. 721 MB = 134% of that constant (the
+  heartbeat's number) but 67% of the real 1 GB cap. Supporting evidence: the
+  first red day (Sep 11, 09:00) came hours BEFORE writes failed (17:12), i.e.
+  the 90% line, and today's run took 49 s, so it did work rather than fail on
+  connect. Unconfirmed until the step log is read.
+- **Policy bug, which is why steady state never holds:** delta protection is
+  anchored, not rolling: `window_end = min(received_at) + 60 d`. The first
+  delta is from ~Aug 12, so on ~Oct 11–12 retention deletes EVERY delta before
+  Oct 11 in one statement, including the 14-day replay window shadow needs.
+  It then re-anchors and protects the next 60 days, which at +49.5 MB/day is
+  ~3 GB. A sawtooth that overshoots the cap by 3x and periodically wipes the
+  tape. Also: DELETE never shrinks `pg_database_size`; nothing runs VACUUM;
+  autovacuum only runs while the compute is awake.
+- **Fuse:** at +49.5 MB/day, 721 MB reaches the 1 GB cap around Oct 12–13.
+  The anchored delta wipe lands about the same day (first retention run after
+  ~Oct 11 22:27 UTC). Whichever comes first decides it. If the cap wins,
+  writes AND deletes are refused again and we repeat September; if the wipe
+  wins, we lose the tape. Neither is acceptable. Beyond the cap there is no
+  graduated overage on Free: writes stop until space is freed or the plan is
+  upgraded (Launch: $0.35/GB-month, no fixed fee).
+
+## D2. Live-checks: unrelated
+Job conclusion `cancelled` after 15 min, annotation: "The job was not acquired
+by Runner of type hosted even after multiple attempts". GitHub infrastructure.
+The previous 48 days were green. No action beyond a re-run.
+
+## D3. Compute: hour-of-day distribution
+The shadow record has no distribution: 0 recognised fills (see D4, and it
+could never have one). The proxy used instead is public trade prints on our 19
+series, mid-priced (10–90c) contracts only, which is where a maker rests:
+
+    best 4h  17–21 UTC  37% of mid volume   (uniform would be 17%)
+    best 6h  15–21 UTC  53%                 (25%)
+    best 8h  14–22 UTC  66%                 (33%)  = 10:00–18:00 ET
+    best 12h 12–00 UTC  81%                 (50%)
+    trough   07–10 UTC  ~1.2–1.5%/h
+
+The fill opportunity is strongly concentrated, so cutting the recorder is
+cheap, provided the hours are chosen and not left to GitHub's random slots.
+CAVEAT: "49 h of 100" is OUR estimate (`transfer_meter.compute_estimate`):
+distinct UTC hour buckets (a 55-min run straddling :00 counts 2) plus cycles
+assumed at 96/day when ~6 run. Neon bills CU-hours, which are wall-hours × CU
+size. The console number is the only one that counts, and nobody has read it.
+
+## D4. Shadow: 0 fills on 28 orders is by construction, not evidence
+- **Bug A (decisive):** `simulate_shadow_order` runs synchronously at
+  placement with `rest_start_ms = now`. It loads trade prints for
+  `[now, now+30 s×steps]`, a window in the future, so the tape is always
+  empty, the status is always `unfilled`, and nothing ever re-evaluates it.
+  This holds at 100% recorder coverage. All 28 rows are void.
+- **Bug C:** `start_price_cents = taker_price_cents` (`run_trading.py:229-230`)
+  and the walk only goes UP from there. A resting buy at the ask we just paid
+  is not a maker order, and `capture = taker − avg ≤ 0` on every possible fill.
+  The spec intent was bid+1.
+- **Bug B:** the category is never passed (`scorer.py` opp has no `category`), so
+  every row is "unknown". That defeats per-series reporting.
+- **Bug D:** the recorder's subscribe list is frozen at recorder start.
+- Want-of-tape is NOT recognised either: missing coverage is classified
+  `unfilled`, never `unproven` (only an `OrderbookGap` row produces unproven).
+- Lesson candidate (L27 shape): the wiring test proved the simulator is CALLED,
+  not that any outcome other than `unfilled` was reachable.
+
+## Research (cited in chat)
+- Kalshi LIP exists (`GET /incentive_programs`, public; 5,477 active).
+  **No KXHIGH* programs are active now.** Past weather LIPs were one-off ~$20,
+  300-lot target, both sides required: out of reach at a $100 bankroll.
+- Fees: `GET /series/{s}` → `fee_type: "quadratic"`, `fee_multiplier: 1` on
+  weather (no maker fee). `GET /series/fee_changes` → empty. Our code
+  hardcodes 0.07 and reads neither.
+
+---
+
+# PLAN — priority reset (FOR APPROVAL, nothing built)
+
+Safety invariants for every item: paper mode untouched; no risk constant
+loosened (P5 adds tests that fail if one is); every DB write path stays in
+bounded, committed batches; destructive steps get a dry-run plus a confirm token.
+
+## P0. Storage, before ~Oct 11 — APPROVED 2026-10-06, BUILT
+- [ ] P0.0 OPERATOR: dispatch `db_stats` (per-table bytes) and paste the
+      retention step log. Still needed: it says whether 14 days of tape fits
+      the 500 MB budget (see the review below).
+- [x] P0.1 Rolling tape retention, `DELTA_RETENTION_DAYS = 14` from NOW,
+      deleted in 10k-row batches (`prune_tape`). The anchored window is gone.
+- [x] P0.2 `NEON_CAP_BYTES` (1 GiB) vs `STORAGE_BUDGET_BYTES` (500 MiB) in
+      retention.py, the single source of truth. `db_growth.py`'s duplicate
+      512 MiB constant was removed. Red = over budget after prune and VACUUM;
+      🚨 at 85% of the cap.
+- [x] P0.3 `VACUUM (ANALYZE)` on price_snapshots and orderbook_delta_raw
+      after every prune (no exclusive lock).
+- [x] P0.4 `maintenance vacuum_full` + `VACUUM-FULL-TAPE` token. Dry run
+      prints sizes, dead rows and headroom. A space guard refuses any table
+      whose worst-case copy would not fit under the cap.
+- [x] Tests (see review).
+
+### P0 review — evidence
+- RED FIRST: `tests/test_retention_rolling.py` was run against the anchored
+  code before any change and 4/5 failed:
+    anchored wipe kept 2 of 15 recent days     `assert 2 == (14 + 1)`
+    old tape survived                          `[0.0, 15.0, 30.0] == [0.0]`
+    sawtooth                                   `assert 300 == 5`
+    file kept growing                          `5308416 <= (1687552 * 1.1)`
+  All pass after.
+- Token gate and verdict through runpy (`tests/test_vacuum_full.py`, 12):
+  near-miss and other actions' tokens exit 2; the VACUUM token cannot
+  authorise a purge; 600 MB is red at 59% of the cap; 470 MB, which the old
+  512 MiB constant called 92%, is green.
+- Full suite: 1130 passed.
+- Real Postgres 16 (docker, L15): seeded 30 days × 4,000 tape rows (85 MB).
+  apply_retention deleted 64,000 in batches; 56,000 = exactly 14 days
+  survived. Plain VACUUM did not shrink the file (expected). VACUUM FULL dry
+  run → execute reclaimed 41 MB (85 → 44 MB). Then 5 days of steady writes,
+  each followed by prune + VACUUM: 46.9, 47.3, 47.4, 47.4, 47.4 MB. Flat.
+- OPEN, stated rather than assumed: whether 14 days of tape fits 500 MB
+  depends on the tape's bytes/day, which only `db_stats` can show. 14 ×
+  49.5 MB/day would be 693 MB, but that 49.5 is the WHOLE database's growth
+  under the old policy, not the tape's rate. If db_stats shows the tape alone
+  exceeds the budget at 14 days, it needs a ruling: a shorter window, or
+  nulling delta payloads sooner. The budget will not be met by deleting
+  inside the replay window silently.
+
+## P1. Compute and scheduling — effort M–L, ~1 day
+- [ ] P1.0 OPERATOR: read Neon console CU-hours MTD (the real meter).
+- [ ] P1.1 Replace hourly recorder crons with ONE "market session" job:
+      recorder plus a 15-min trade loop inside a single run, 15–21 UTC (6 h, the
+      GitHub-hosted job maximum; 53% of mid volume). Several cron triggers
+      (14:45, 15:00, 15:15) under one concurrency group, so a dropped trigger
+      does not lose the day. Outside the session: sparse standalone cycles, as
+      GitHub delivers them. Fixes Bug D for free (refresh subscriptions inside
+      the session).
+- [ ] P1.2 Fix the estimator: count wall-minutes of recorder runs, and cycles
+      that actually ran. Label it "estimate" until P1.0 calibrates it.
+- [ ] Recommend widening to 8 h (14–22, 66%) via two chained jobs only if
+      the console shows headroom after one week.
+
+## P2. Shadow repair: makes the Phase 3 evidence real — effort M, ~1 day
+- [ ] Defer evaluation: insert `pending`; a resolver resolves rows whose
+      window closed; no recorder coverage over the window → `unproven`.
+- [ ] Start at the passive side (best bid on our side, or +1 tick), cap
+      unchanged (`max_price_cents`). Capture vs the taker price stays the metric.
+- [ ] Pass `category` and series; report per series.
+- [ ] Mark the 28 existing rows `void` (kept, not deleted, with a reason).
+- [ ] Test: an order with a known trade-through inside a recorded window
+      resolves `filled` (the L27-shaped test that was missing).
+
+## Main track (a): what is missing to enable maker on ONE weather series, paper
+Per-series evidence, never pooled: capture floor (mean capture > 0 with CI)
+AND frequency floor (fills/eligible orders ≥ bar), from P2-valid rows only,
+inside recorded windows. Missing today: (1) any valid row (P2); (2) coverage
+during order windows (P1); (3) a stated N per series before the floors are
+read; (4) the paper maker execution path writes taker fills only
+(`PAPER_CONSERVATIVE_FILLS`), so an allow-listed series stays shadow-only
+until a ruling on that fourth layer. Pick the series by evidence, not now.
+
+## P3. Fee watchdog (d) — effort S, ~2 h
+- [ ] Each cycle: `GET /series/{s}` fee_type/fee_multiplier per traded series
+      plus `GET /series/fee_changes`. Compare against what `ev/calculator.py`
+      models (quadratic, 0.07, no maker fee). Mismatch → refuse that series
+      (fail safe) + Telegram, and recompute after-fee edge from the live
+      multiplier. API failure → skip trading the series, never assume.
+
+## P4. Kill switches (c) — effort M, ~1 day
+Existing (`risk/limits.py`): 3% single trade, 25% exposure, daily-loss
+pause, 20% drawdown breaker, cluster cap (weather keyed by series+date).
+All are per-trade REFUSALS recomputed each cycle. Missing, genuinely:
+- [ ] A latched halt: once tripped, stays tripped until a human clears it
+      (DB flag + Telegram). Today the drawdown breaker un-trips on a bounce.
+- [ ] Anomaly halts: fill price > X c from the model or quote; bankroll step
+      drop > Y% in one cycle; N consecutive Kalshi API errors; stale model
+      inputs. No "regime guard" exists in the code; this is the honest version.
+- [ ] Silence is not health: 26 consecutive red retention days produced no
+      action. The heartbeat lists any workflow red more than 1 day.
+- [ ] A demonstrated-failure test per switch (trip, latched, blocks the next
+      trade, restart only via an explicit clear).
+
+## P5. Size ramp (e) — effort S–M, before any live flip only
+- [ ] Live stage table: 1 contract for the first 20 live trades; step up only
+      if realized-vs-paper slippage ≤ stated bar and no halt fired. The ramp
+      can only reduce size under the hard caps, never raise them. A test
+      asserts each cap is unchanged.
+
+## P6. LIP tracker (b) — effort S, ~2 h, lowest priority
+- [ ] Daily: active `/incentive_programs` joined on our series tickers;
+      digest line. A separate rewards PnL line only once we can qualify
+      (both-sides target size is beyond the current bankroll).
+
+## Scope (f): frozen
+No new model types; economics stays closed; low-temp series not started.
+
+## Recommended order
+P0 (deadline ~Oct 11) → P1 (compute deadline; P1.0 first) → P2 → P3 → P4 →
+P6; P5 at the live-flip ruling. Gate 32/50 means P3+P4+P5 must land before 50.
