@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import logging
 import sys
 
@@ -21,6 +22,7 @@ from src.maintenance.retention import (
     STORAGE_BUDGET_BYTES,
     apply_retention,
     database_size_bytes,
+    defend_cap,
     format_plan,
     live_bytes_estimate,
     plan_retention,
@@ -79,6 +81,21 @@ def main(argv=None) -> int:
         except Exception:
             logger.error("VACUUM failed — freed space will not be reused", exc_info=True)
             text += "\n\nVACUUM FAILED — see logs"
+
+    # Cap defense (ruling C). Alerts go to Telegram on every step.
+    if not args.dry_run:
+        try:
+            from src.alerts import Alerter
+
+            alerter = Alerter()
+            steps = defend_cap(engine, dt.datetime.now(dt.timezone.utc), alerter.send)
+            if steps:
+                plan.size_bytes = database_size_bytes(engine)
+                plan.live_bytes = live_bytes_estimate(engine)
+                text += "\n\nCAP DEFENSE:\n  " + "\n  ".join(steps)
+        except Exception:
+            logger.error("Cap defense failed", exc_info=True)
+            text += "\n\nCAP DEFENSE FAILED — see logs"
 
     # Red means LIVE data over our budget after pruning (dead pages are
     # reused, and are reported, not alarmed), or the file near Neon's cap,

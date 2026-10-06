@@ -78,6 +78,13 @@ DELETE_BATCH = 10_000
 # freed pages are reused instead of the files growing.
 PRUNED_TABLES = ("price_snapshots", "orderbook_delta_raw")
 
+# Cap defense (ruling 2026-10-06 C). From CAP_DEFENSE_TRIGGER of the cap, the
+# tape window may be cut a day at a time, oldest first, while LIVE data is at
+# or above CAP_DEFENSE_TARGET, never below TAPE_FLOOR_DAYS.
+CAP_DEFENSE_TRIGGER = 0.85
+CAP_DEFENSE_TARGET = 0.75
+TAPE_FLOOR_DAYS = 7
+
 
 @dataclass
 class RetentionPlan:
@@ -152,10 +159,10 @@ def live_bytes_estimate(engine: Engine) -> Optional[int]:
     return int(value or 0)
 
 
-def tape_cutoff(now: dt.datetime) -> dt.datetime:
+def tape_cutoff(now: dt.datetime, days: int = DELTA_RETENTION_DAYS) -> dt.datetime:
     """Tape received before this is pruned. Rolls with the clock and never
     depends on what is in the table."""
-    return now - dt.timedelta(days=DELTA_RETENTION_DAYS)
+    return now - dt.timedelta(days=days)
 
 
 def plan_retention(engine: Engine, now: Optional[dt.datetime] = None) -> RetentionPlan:
@@ -199,7 +206,7 @@ def plan_retention(engine: Engine, now: Optional[dt.datetime] = None) -> Retenti
     return plan
 
 
-def prune_tape(engine: Engine, now: dt.datetime) -> int:
+def prune_tape(engine: Engine, now: dt.datetime, days: int = DELTA_RETENTION_DAYS) -> int:
     """Delete tape older than the rolling window, DELETE_BATCH rows at a time.
 
     Each batch commits on its own, so a run killed halfway has still removed
@@ -208,7 +215,7 @@ def prune_tape(engine: Engine, now: dt.datetime) -> int:
     """
     from src.models.orderbook_raw import OrderbookDeltaRaw
 
-    cutoff = tape_cutoff(now)
+    cutoff = tape_cutoff(now, days)
     deleted = 0
     while True:
         with get_session(engine) as session:
@@ -227,6 +234,52 @@ def prune_tape(engine: Engine, now: dt.datetime) -> int:
             )
             session.commit()
             deleted += result.rowcount or 0
+
+
+def defend_cap(engine: Engine, now: dt.datetime, alert) -> List[str]:
+    """Give up the oldest tape, one day at a time, when the cap is close.
+
+    Triggered by the FILE (what Neon counts), from CAP_DEFENSE_TRIGGER of the
+    cap. A day is cut only while LIVE data is at or above CAP_DEFENSE_TARGET:
+    deleting rows does not shrink the file, so cutting tape out of a file that
+    is high because of dead pages loses data and gains nothing. That case gets
+    an alert to dispatch shrink_tape. Every step alerts; the floor alerts.
+    """
+    size = database_size_bytes(engine)
+    if size < CAP_DEFENSE_TRIGGER * NEON_CAP_BYTES:
+        return []
+
+    def live() -> int:
+        value = live_bytes_estimate(engine)
+        return size if value is None else value
+
+    if live() < CAP_DEFENSE_TARGET * NEON_CAP_BYTES:
+        alert(
+            f"🚨 DB file at {size / NEON_CAP_BYTES:.0%} of the Neon cap but live data "
+            f"is {live() / NEON_CAP_BYTES:.0%}: dead pages. No tape cut. Dispatch "
+            f"maintenance shrink_tape (dry run first)."
+        )
+        return []
+
+    steps: List[str] = []
+    for days in range(DELTA_RETENTION_DAYS - 1, TAPE_FLOOR_DAYS - 1, -1):
+        removed = prune_tape(engine, now, days=days)
+        vacuum_pruned_tables(engine)
+        now_live = live()
+        step = (
+            f"tape window cut to {days} days: {removed:,} oldest rows removed, live "
+            f"data now {now_live / NEON_CAP_BYTES:.0%} of the cap"
+        )
+        steps.append(step)
+        alert(f"⚠️ Cap defense: {step}")
+        if now_live < CAP_DEFENSE_TARGET * NEON_CAP_BYTES:
+            return steps
+    alert(
+        f"🚨 Cap defense reached the {TAPE_FLOOR_DAYS}-day tape floor and live data is "
+        f"still {live() / NEON_CAP_BYTES:.0%} of the cap. Needs a human: slimmer "
+        f"payloads, fewer markets, or a paid plan."
+    )
+    return steps
 
 
 def vacuum_pruned_tables(engine: Engine) -> List[str]:

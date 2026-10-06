@@ -36,6 +36,9 @@ jobs:
       - name: Apply retention
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # Cap defense alerts on every step it takes (ruling 2026-10-06 C).
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python -m src.maintenance.prune ${{ inputs.dry_run == 'true' && '--dry-run' || '' }}
       - name: Alert on failure
         if: failure()
