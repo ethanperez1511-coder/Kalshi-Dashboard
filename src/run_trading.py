@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import logging
+import os
 import time
 import signal
 import time
@@ -53,6 +54,7 @@ from src.risk.manager import RiskManager
 from src.trading.engine import TradeEngine, sync_live_bankroll
 from src.trading.settler import Settler
 from src.cycle_lock import cycle_lock
+from src.cycle_log import cycles_digest, format_cycles_digest, ping_deadman, record_cycle
 from src.trading.fee_schedule import BASE_TAKER_RATE, fee_digest, format_fee_digest
 
 logging.basicConfig(
@@ -326,7 +328,26 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
         if not held:
             logger.warning("Another cycle holds the cycle lock — skipping this one")
             return None
-        return _run_pipeline_locked(alerter or Alerter(), cycle, settings, engine)
+        started = dt.datetime.now(dt.timezone.utc)
+        source = os.environ.get("GITHUB_WORKFLOW", "manual")
+        try:
+            result = _run_pipeline_locked(alerter or Alerter(), cycle, settings, engine)
+        except Exception:
+            _record_quietly(engine, started, False, source)
+            raise
+        _record_quietly(engine, started, True, source)
+        # After the record, so a ping always means "a cycle finished".
+        ping_deadman(os.environ.get("DEADMAN_PING_URL", ""))
+        return result
+
+
+def _record_quietly(engine, started, ok, source) -> None:
+    """The cycle record is reporting; failing to write it must not turn a
+    finished cycle into a failed one."""
+    try:
+        record_cycle(engine, started, dt.datetime.now(dt.timezone.utc), ok, source)
+    except Exception:
+        logger.warning("Could not record the cycle (non-fatal)", exc_info=True)
 
 
 def _run_pipeline_locked(alerter: Alerter, cycle: int, settings: Settings, engine):
@@ -513,6 +534,9 @@ def _run_pipeline_locked(alerter: Alerter, cycle: int, settings: Settings, engin
                 # summary: the Actions page is where a starved scorable set is
                 # diagnosed, but Telegram is where it gets noticed.
                 _section("🔻 Funnel", lambda: "🔻 " + funnel.headline()),
+                # A schedule that does not fire produces no error, so the only
+                # way to see a gap is to count what ran (2026-10-06, L32).
+                _section("🔁 Cycles", lambda: format_cycles_digest(cycles_digest(engine))),
                 _section("📦 Deploy", lambda: format_deployment_state(deployment_state(engine))),
                 _section("🌡 Weather", lambda: format_weather_digest(weather_digest(engine))),
                 _section("🎙 Recorder", lambda: format_recorder_health(recorder_health(engine))),

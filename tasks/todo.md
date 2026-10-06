@@ -2033,3 +2033,20 @@ Each defect gets a test shown FAILING on the current code before the fix.
 - FINDING (inert today): opp["net_ev"] is the YES side's EV on every call;
   execute_qualifying builds no_ev = -net_ev. Risk/Kelly do not read it, so
   sizing is unaffected; the fee check now uses traded_net_ev.
+
+## Backstop and dead-man's switch (rulings 2026-10-06, fourth pass)
+- [x] trade.yml */15 BACKSTOP restored (L32). Overlap is safe: the advisory
+      cycle lock makes the second cycle skip; backstop cycles never write
+      tape, so shrink_tape's "recorder is writing" check is unaffected.
+- [ ] EXIT CRITERION: remove the backstop schedule, in its OWN commit, only
+      after 7 CONSECUTIVE days on which market-session ran green AND
+      session-watchdog ran green. Evidence: the digest's "🔁 Cycles 24h"
+      line showing session N/24 with no ⚠️, for those 7 days.
+- [x] cycle_runs table + digest line "Cycles 24h: session N/24 expected,
+      backstop M", ⚠️ when the session is short.
+- [x] Dead-man ping after each successful cycle (DEADMAN_PING_URL secret).
+      OPERATOR: create the healthchecks.io check and add the secret.
+- [ ] Measure: GitHub-delivered backstop cycles per day for 7 days (digest).
+- [ ] Evaluate before ANY external trigger token: GitHub Environment
+      `destructive` with a required reviewer on maintenance's confirm path.
+- [ ] E: steady-state table after 3 full session days.

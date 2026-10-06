@@ -13,9 +13,9 @@ name: market-session
 # two links. A link that cannot finish the window dispatches its successor
 # through workflow_dispatch, the one event GITHUB_TOKEN may trigger.
 #
-# Outside the window there are NO trade cycles: trade.yml and book-recorder.yml
-# keep only their manual buttons. A manual cycle during a session is harmless:
-# the cycle lock in the database refuses the second one.
+# trade.yml keeps a BACKSTOP schedule until this job has proven itself (L32);
+# book-recorder.yml is manual-only. A backstop or manual cycle during a session
+# is harmless: the cycle lock in the database refuses the second one.
 on:
   schedule:
     - cron: "0 13 * * *"
@@ -60,6 +60,7 @@ jobs:
           ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
           TRADING_SHADOW_MAKER_ENABLED: ${{ vars.TRADING_SHADOW_MAKER_ENABLED }}
           TRADING_EXCLUDED_SERIES: ${{ vars.TRADING_EXCLUDED_SERIES }}
+          DEADMAN_PING_URL: ${{ secrets.DEADMAN_PING_URL }}
           GITHUB_TOKEN: ${{ github.token }}
           SESSION_WORKFLOW: session.yml
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
