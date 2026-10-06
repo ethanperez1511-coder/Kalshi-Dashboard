@@ -115,24 +115,87 @@ def load_tape(
     return out
 
 
-def has_gap(engine: Engine, market_id: str, start_ms: int, end_ms: int) -> bool:
-    """Did the recorded sequence break while our order would have rested?
+def _dt(ms: int):
+    import datetime as dt
 
-    Across a gap the book is unreconstructable, so we cannot prove the order was
-    still resting — and an unprovable fill must not be counted as one.
+    return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc)
+
+
+def _first_row_after(engine: Engine, at, before=None):
+    with get_session(engine) as session:
+        query = (
+            select(OrderbookDeltaRaw.received_at)
+            .where(OrderbookDeltaRaw.received_at > at)
+        )
+        if before is not None:
+            query = query.where(OrderbookDeltaRaw.received_at < before)
+        return session.execute(
+            query.order_by(OrderbookDeltaRaw.received_at).limit(1)
+        ).scalar()
+
+
+def has_gap(engine: Engine, market_id: str, start_ms: int, end_ms: int) -> bool:
+    """Could the recorded stream have lost a message while our order rested?
+
+    `seq` is per SUBSCRIPTION, and every recorded market shares the same
+    subscriptions, so a gap revealed by ANY market's message may have lost a
+    print for ours. And a gap is detected at the next message, which can
+    arrive after the window ends. So: any gap, on any ticker, detected from
+    the window's start until the first row recorded after its end. (Until
+    2026-10-06 only gaps tagged with this ticker and inside the window counted.)
+
+    `market_id` is kept for the call signature; the rule no longer narrows on it.
     """
     import datetime as dt
 
-    start = dt.datetime.fromtimestamp(start_ms / 1000, dt.timezone.utc)
-    end = dt.datetime.fromtimestamp(end_ms / 1000, dt.timezone.utc)
+    start, end = _dt(start_ms), _dt(end_ms)
+    horizon = _first_row_after(engine, end) or (end + dt.timedelta(minutes=10))
     with get_session(engine) as session:
         return session.execute(
             select(OrderbookGap.id)
-            .where(OrderbookGap.market_ticker == market_id)
             .where(OrderbookGap.detected_at >= start)
-            .where(OrderbookGap.detected_at <= end)
+            .where(OrderbookGap.detected_at <= horizon)
             .limit(1)
         ).first() is not None
+
+
+def coverage(engine: Engine, market_id: str, start_ms: int, end_ms: int):
+    """Was the recorder demonstrably watching this market for the whole window?
+
+    Returns (covered, reason). Covered means all three:
+      * this market was snapshotted before the window opened (it was on the
+        subscription when the order began resting)
+      * no new snapshot for it inside the window (a reconnect or a new
+        recorder segment re-snapshots every market, and leaves a hole)
+      * the same connection delivered a row after the window closed (any
+        market, before this market's next snapshot), so it did not die midway
+    """
+    start, end = _dt(start_ms), _dt(end_ms)
+    with get_session(engine) as session:
+        def snapshot(where, order):
+            return session.execute(
+                select(OrderbookDeltaRaw.received_at)
+                .where(OrderbookDeltaRaw.market_ticker == market_id)
+                .where(OrderbookDeltaRaw.msg_type == "snapshot")
+                .where(where).order_by(order).limit(1)
+            ).scalar()
+
+        anchor = snapshot(OrderbookDeltaRaw.received_at <= start,
+                          OrderbookDeltaRaw.received_at.desc())
+        if anchor is None:
+            return False, "not subscribed before the order began resting"
+        inside = snapshot(
+            (OrderbookDeltaRaw.received_at > anchor) & (OrderbookDeltaRaw.received_at <= end),
+            OrderbookDeltaRaw.received_at,
+        )
+        if inside is not None:
+            return False, "the recorder reconnected or restarted inside the window"
+        next_snapshot = snapshot(OrderbookDeltaRaw.received_at > end,
+                                 OrderbookDeltaRaw.received_at)
+
+    if _first_row_after(engine, end, before=next_snapshot) is None:
+        return False, "no row from the same connection after the window (not yet recorded, or it died)"
+    return True, "covered"
 
 
 def trades_through(trade: TapeTrade, side: str, price_cents: int) -> bool:

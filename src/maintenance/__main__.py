@@ -11,6 +11,8 @@
     python -m src.maintenance --vacuum-full --confirm VACUUM-FULL-TAPE
     python -m src.maintenance --shrink-tape                         # measure, dry run
     python -m src.maintenance --shrink-tape --confirm SHRINK-TAPE
+    python -m src.maintenance --wipe-void-shadow                    # dry run
+    python -m src.maintenance --wipe-void-shadow --confirm WIPE-VOID-SHADOW
 
 The two destructive actions have separate confirmation tokens on purpose. One
 token for two destructive operations means confirming either confirms both.
@@ -104,6 +106,11 @@ def main(argv=None) -> int:
         ),
     )
     parser.add_argument(
+        "--wipe-void-shadow", action="store_true",
+        help="Delete shadow rows written before the 2026-10-06 rebuild (void). "
+             "Dry run unless --confirm WIPE-VOID-SHADOW",
+    )
+    parser.add_argument(
         "--max-chunks", type=int, default=None,
         help="With --shrink-tape: stop after this many chunks (an installment; no reindex).",
     )
@@ -126,6 +133,9 @@ def main(argv=None) -> int:
 
     if args.vacuum_full:
         return _vacuum_full(engine, args.confirm.strip())
+
+    if args.wipe_void_shadow:
+        return _wipe_void_shadow(engine, args.confirm.strip())
 
     if args.shrink_tape:
         return _shrink_tape(engine, args.confirm.strip(), args.max_chunks)
@@ -249,6 +259,42 @@ def _vacuum_full(engine, token: str) -> int:
         f"{len(plan.refused)} refused by the space guard"
     )
     write_summary(headline, text[:4000], ok=True)
+    return 0
+
+
+WIPE_SHADOW_TOKEN = "WIPE-VOID-SHADOW"
+
+
+def _wipe_void_shadow(engine, token: str) -> int:
+    """Delete the shadow rows the pre-rebuild code wrote. Ruling 2026-10-06:
+    they were judged before their tape could exist, so they are void. They
+    are identified by what the old code never stored (a plan), not by a
+    date, so a row placed by the new code can never be caught."""
+    from sqlalchemy import delete, func, select
+
+    from src.database import get_session
+    from src.models.shadow import ShadowMakerOrder
+
+    if token and token != WIPE_SHADOW_TOKEN:
+        logger.error("Confirmation token did not match. Expected %r, got %r. "
+                     "Nothing was changed.", WIPE_SHADOW_TOKEN, token)
+        write_summary("Wipe void shadow: BAD CONFIRM TOKEN — nothing changed", ok=False)
+        return 2
+
+    void = ShadowMakerOrder.planned_steps.is_(None)
+    with get_session(engine) as session:
+        count = session.execute(select(func.count()).select_from(ShadowMakerOrder).where(void)).scalar()
+        kept = session.execute(select(func.count()).select_from(ShadowMakerOrder).where(~void)).scalar()
+        if token == WIPE_SHADOW_TOKEN:
+            session.execute(delete(ShadowMakerOrder).where(void))
+            session.commit()
+    text = (
+        f"WIPE VOID SHADOW {'EXECUTED' if token else 'DRY RUN'}: "
+        f"{'deleted' if token else 'would delete'} {count} pre-rebuild rows; "
+        f"{kept} rebuilt rows untouched"
+    )
+    print(text)
+    write_summary(text, ok=True)
     return 0
 
 

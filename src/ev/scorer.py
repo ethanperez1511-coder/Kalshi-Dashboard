@@ -284,6 +284,10 @@ def score_all_markets(
             "traded_edge": ev_result.best_edge,
             "evaluated_price": ev_result.best_fill_cents,
             "net_ev": ev_result.net_ev,
+            # `net_ev` above is the YES side's, even on a NO call. The traded
+            # side's own after-fee EV, for anything that must judge the trade
+            # actually being placed (the fee schedule check).
+            "traded_net_ev": ev_result.best_ev,
             "recommended_side": ev_result.recommended_side,
             "confidence": model_result.confidence,
             "status": filter_result.status,
@@ -292,6 +296,9 @@ def score_all_markets(
             "model_type": winning_model_type,
             "yes_bid": yes_bid,
             "yes_ask": yes_ask,
+            # The shadow row and every per-category report read this; it was
+            # missing, so every shadow row said "unknown".
+            "category": category,
         }
         funnel.scored += 1
         results.append(result_dict)

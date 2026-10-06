@@ -78,6 +78,7 @@ def build_plan(
     max_steps: int = MAKER_MAX_STEPS,
     rest_seconds: float = MAKER_REST_SECONDS,
     timeout_seconds: float = MAKER_TIMEOUT_SECONDS,
+    ceiling_cents: Optional[int] = None,
 ) -> WalkPlan:
     """Prices this order may rest at, in order, stopping at the cap.
 
@@ -86,6 +87,10 @@ def build_plan(
     there is no price at which it is still the approved trade.
     """
     cap = max_price_cents(p_model, required_edge, side)
+    # A maker order must stay strictly below the price a taker would pay, or
+    # it is a taker order with extra steps.
+    if ceiling_cents is not None:
+        cap = min(cap, ceiling_cents)
 
     steps: List[WalkStep] = []
     elapsed = 0.0

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, Integer, Numeric, String, Text
+from sqlalchemy import BigInteger, DateTime, Float, Integer, Numeric, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.database import Base
@@ -51,9 +51,20 @@ class ShadowMakerOrder(Base):
     maker_fee: Mapped[Optional[Decimal]] = mapped_column(_MONEY, nullable=True, default=None)
     taker_fee: Mapped[Optional[Decimal]] = mapped_column(_MONEY, nullable=True, default=None)
 
-    # filled | partial | unfilled | not_placed | unproven
+    # pending | filled | partial | unfilled | not_placed | unproven
     status: Mapped[str] = mapped_column(String(16), index=True)
     reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+
+    # The plan, stored at placement so the order can be judged once its window
+    # has closed and its tape exists (rebuild 2026-10-06). Rows written before
+    # the rebuild have NULL here: that is how the void ones are identified.
+    planned_steps: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    rest_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
+    maker_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
+    taker_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None
+    )
 
     # BigInteger: an epoch-ms value is ~1.79e12 and overflows int4 on Postgres.
     rest_start_ms: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, default=None)

@@ -35,7 +35,7 @@ from src.recorder.health import format_recorder_health, recorder_health
 from decimal import Decimal
 
 from src.execution.allowlist import describe as describe_maker
-from src.execution.shadow import format_report as format_shadow, report_by_category
+from src.execution.shadow import format_report as format_shadow, report_by_series
 from src.digest_health import record_section
 from src.db_growth import format_growth, growth, record_sample
 from src import transfer_meter
@@ -53,6 +53,7 @@ from src.risk.manager import RiskManager
 from src.trading.engine import TradeEngine, sync_live_bankroll
 from src.trading.settler import Settler
 from src.cycle_lock import cycle_lock
+from src.trading.fee_schedule import BASE_TAKER_RATE, fee_digest, format_fee_digest
 
 logging.basicConfig(
     level=logging.INFO,
@@ -107,20 +108,62 @@ def _required_edge(confidence: float) -> float:
 
 
 def simulate_shadow_order(engine, **kwargs):
-    """Thin seam over the shadow simulator.
+    """Thin seam over shadow placement.
 
     Module-level and named so the wiring can be asserted from outside. The
     simulator was fully built, unit-tested and reachable from nothing for the
     whole of Phase 3; a test that patches this name proves the pipeline calls
     it, which is the property that was actually missing.
-    """
-    from src.execution.shadow import simulate_order
 
-    return simulate_order(engine, **kwargs)
+    Since the 2026-10-06 rebuild this PLACES the order as pending. It is
+    judged later by `resolve_pending`, once its window has closed and the
+    recorder's tape for it exists.
+    """
+    from src.execution.shadow import place_order
+
+    return place_order(engine, **kwargs)
+
+
+def _apply_fee_schedule(fee_book, opp):
+    """The series' published fee, applied before risk sees the opportunity.
+    Returns (opp, schedule, refusal).
+
+    Scoring ranks with the standard rate. Here the real schedule decides: no
+    schedule we can vouch for is a refusal; a different rate moves the
+    after-fee EV by the per-contract fee difference at the evaluated price, and
+    an edge that does not survive it is a refusal.
+    """
+    from src.ingestion.exclusions import series_of
+    from src.trading.fee_schedule import BASE_TAKER_RATE
+    from src.trading.fees import kalshi_fee
+
+    schedule, refusal = fee_book.schedule(series_of(opp["market_id"]))
+    if refusal:
+        return opp, None, refusal
+    if schedule.taker_rate == BASE_TAKER_RATE:
+        return opp, schedule, None
+
+    price = opp.get("evaluated_price") or (
+        opp.get("yes_ask") if opp.get("recommended_side") == "yes"
+        else 100 - (opp.get("yes_bid") or 0)
+    )
+    # The TRADED side's after-fee EV. `net_ev` is the YES side's even on a NO
+    # call, and judging a NO trade by it would be judging a different trade.
+    base = opp.get("traded_net_ev")
+    if base is None:
+        return opp, None, "no traded-side EV on the opportunity to re-price the fee against"
+    extra = schedule.fee(1, int(price)) - kalshi_fee(1, int(price))
+    after = base - extra
+    if after <= 0:
+        return opp, None, (
+            f"after-fee edge gone at {schedule.fee_type} x{schedule.multiplier:g} "
+            f"(traded net EV {base:.4f} -> {after:.4f})"
+        )
+    return dict(opp, traded_net_ev=after), schedule, None
 
 
 def execute_qualifying(
-    engine, qualifying, alerter, kalshi_client=None, now=None,
+    engine, qualifying, alerter, kalshi_client=None, now=None, fee_book=None,
 ):
     """Risk-evaluate and execute each qualifying opportunity.
 
@@ -143,6 +186,15 @@ def execute_qualifying(
 
     logger.info("=== Evaluating and executing trades ===")
     for opp in qualifying:
+        fee_rate, schedule = None, None
+        if fee_book is not None:
+            opp, schedule, refusal = _apply_fee_schedule(fee_book, opp)
+            fee_rate = schedule.taker_rate if schedule else None
+            if refusal:
+                logger.info("  ✗ %s: FEE REFUSED — %s", opp["market_id"], refusal)
+                exec_funnel.record_fee_refusal(refusal)
+                continue
+
         ev = EVResult(
             p_model=opp["p_model"],
             implied_prob=opp["implied_prob"],
@@ -181,6 +233,7 @@ def execute_qualifying(
             model_name=opp.get("model_name", ""),
             traded_edge=opp.get("traded_edge"),
             evaluated_price=opp.get("evaluated_price"),
+            fee_rate=fee_rate,
         )
 
         if not result:
@@ -228,8 +281,14 @@ def execute_qualifying(
                         market_id=result["market_id"],
                         side=result["side"],
                         quantity=Decimal(str(result["quantity"])),
-                        start_price_cents=int(result["price"]),
+                        # The quote at decision time: the order rests one cent
+                        # inside our side's bid, never at the price just paid.
+                        yes_bid=int(opp.get("yes_bid") or 0),
+                        yes_ask=int(opp.get("yes_ask") or 0),
                         taker_price_cents=int(result["price"]),
+                        # The series' own schedule: weather pays no maker fee.
+                        maker_rate=schedule.maker_rate if schedule else 0.0,
+                        taker_rate=schedule.taker_rate if schedule else BASE_TAKER_RATE,
                         p_model=opp["p_model"],
                         required_edge=_required_edge(opp["confidence"]),
                         rest_start_ms=int(
@@ -240,7 +299,8 @@ def execute_qualifying(
                         model_name=opp.get("model_name", ""),
                     )
                     exec_funnel.record_shadow(
-                        getattr(shadow_outcome, "status", "unknown")
+                        shadow_outcome if isinstance(shadow_outcome, str)
+                        else getattr(shadow_outcome, "status", "unknown")
                     )
                 except Exception:
                     # Isolated, but never unreported: a swallowed failure that
@@ -460,11 +520,14 @@ def _run_pipeline_locked(alerter: Alerter, cycle: int, settings: Settings, engin
                 # The fill rule over-represents adverse selection by
                 # construction, so a single figure would launder that bias
                 # into a verdict.
-                _section("🪞 Shadow", lambda: format_shadow(report_by_category(engine))),
+                _section("🪞 Shadow", lambda: format_shadow(report_by_series(engine))),
                 # Stated every day including when nothing is enabled, and the
                 # two enabled states are named apart: a series on the list is
                 # shadow-only while PAPER_CONSERVATIVE_FILLS is on.
                 _section("⚙️ Maker", describe_maker),
+                # Every series running on a cached or refused fee schedule is
+                # named here (ruling 2026-10-06 D); refusals also alert at once.
+                _section("💸 Fees", lambda: format_fee_digest(fee_digest(engine))),
                 # A level is not a warning: 376 MB is fine on a database that
                 # has been 370 MB for a month and an emergency on one that was
                 # 200 MB on Friday. The rate is what would have shown the
@@ -494,12 +557,30 @@ def _run_pipeline_locked(alerter: Alerter, cycle: int, settings: Settings, engin
             f"side={r['recommended_side']} [{r['status']}]"
         )
 
+    # Judge shadow orders whose rest window has closed. Every cycle, trades or
+    # not: an order placed in one cycle is judged in a later one, once the
+    # recorder's tape for its window exists.
+    if SHADOW_MAKER_ENABLED:
+        try:
+            from src.execution.shadow import resolve_pending
+
+            resolved = resolve_pending(engine)
+            if resolved:
+                logger.info("Shadow orders resolved: %s", resolved)
+        except Exception:
+            logger.warning("Shadow resolution failed (non-fatal)", exc_info=True)
+
     if not qualifying:
         logger.info("No qualifying opportunities — nothing to trade.")
         return
 
+    from src.trading.fee_schedule import FeeBook, fetch_from_kalshi
+
+    fee_book = FeeBook(
+        engine, fetch=fetch_from_kalshi(settings.KALSHI_BASE_URL), alert=alerter.send,
+    )
     exec_funnel, trades_placed = execute_qualifying(
-        engine, qualifying, alerter, kalshi_client=kalshi_client,
+        engine, qualifying, alerter, kalshi_client=kalshi_client, fee_book=fee_book,
     )
 
     # Summary
