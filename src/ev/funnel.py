@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 
 
 @dataclass
@@ -54,6 +54,9 @@ class ScoreFunnel:
     # reported alongside it: a filter nobody can see is how a legitimate series
     # gets dropped for a month without anyone noticing.
     ingest_excluded: Dict[str, int] = field(default_factory=dict)
+    # (series, count, share) for series dominating the write — possible new
+    # parlay mints. In the headline, because the log alone went unread.
+    ingest_concentration: List[Tuple[str, int, float]] = field(default_factory=list)
     # State of the metered odds feed. "SportsOddsModel produced nothing" is a
     # market fact if the feed is healthy and a source outage if it is not, and
     # the two must never be reported as the same line.
@@ -144,5 +147,9 @@ class ScoreFunnel:
             + (
                 f" | ingest excluded {sum(self.ingest_excluded.values())}"
                 if self.ingest_excluded else ""
+            )
+            + "".join(
+                f" | ⚠️ possible mint {series} {share:.0%} of write ({count})"
+                for series, count, share in self.ingest_concentration
             )
         )

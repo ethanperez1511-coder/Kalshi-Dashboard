@@ -30,8 +30,9 @@ from src.ingestion.exclusions import (
 
 
 class _Market:
-    def __init__(self, ticker):
+    def __init__(self, ticker, mve_collection_ticker=None):
         self.ticker = ticker
+        self.mve_collection_ticker = mve_collection_ticker
 
 
 class TestSeriesExtraction:
@@ -130,6 +131,67 @@ class TestConcentrationDetector:
         """It is already handled; repeating it every cycle is noise that would
         train the operator to ignore the line that matters."""
         markets = [_Market(f"KXMVECROSSCATEGORY-{i}") for i in range(90)]
-        markets += [_Market(f"KXHIGHNY-{i}") for i in range(10)]
+        markets += [_Market(f"KX{i % 10}-{i}") for i in range(100)]
 
         assert concentration_warnings(markets, threshold=0.25) == []
+
+
+class TestCollectionSiblings:
+    """2026-10-06: KXMVECROSSCATEGORY0 markets reached the database although
+    KXMVECROSSCATEGORY is excluded. Kalshi minted a sibling series name into
+    the SAME parlay collection: every one carries
+    mve_collection_ticker='KXMVECROSSCATEGORY-R' (measured on the live API).
+    The rule follows the collection Kalshi itself declares, not the name, and
+    still never matches a prefix."""
+
+    SIBLING = "KXMVECROSSCATEGORY0-S20268201371F47A-E979B8FB158"
+
+    def test_a_sibling_series_in_an_excluded_collection_is_excluded(self):
+        counts = {}
+        kept = filter_ingestable(
+            [_Market(self.SIBLING, "KXMVECROSSCATEGORY-R"), _Market("KXHIGHNY-26OCT07-T70")],
+            counts,
+        )
+        assert [m.ticker for m in kept] == ["KXHIGHNY-26OCT07-T70"]
+        # Tallied under its own name, so the digest shows the sibling exists.
+        assert counts == {"KXMVECROSSCATEGORY0": 1}
+
+    def test_a_parlay_in_a_collection_nobody_excluded_is_kept(self):
+        """SportsOdds prices MVE parlays. Excluding every KXMVE market is a
+        ruling about that model's universe, not an ingest fix."""
+        market = _Market("KXMVESPORTSFOO-S2026-ABC", "KXMVESPORTSFOO-R")
+        assert filter_ingestable([market]) == [market]
+
+    def test_the_schema_keeps_kalshis_collection_field(self):
+        from src.kalshi.schemas import KalshiMarket
+
+        market = KalshiMarket(
+            ticker=self.SIBLING, title="t", close_time="2026-10-07T00:00:00Z",
+            status="active", mve_collection_ticker="KXMVECROSSCATEGORY-R",
+        )
+        assert market.mve_collection_ticker == "KXMVECROSSCATEGORY-R"
+
+    def test_a_null_collection_is_no_collection(self):
+        from src.kalshi.schemas import KalshiMarket
+
+        market = KalshiMarket(
+            ticker="KXHIGHNY-26OCT07-T70", title="t",
+            close_time="2026-10-07T00:00:00Z", status="active",
+            mve_collection_ticker=None,
+        )
+        assert filter_ingestable([market]) == [market]
+
+
+class TestDetectorDenominator:
+    def test_excluded_rows_do_not_dilute_a_new_mint(self):
+        """The fetch is mostly excluded parlays. A new mint at 150 of 1,050
+        rows read as 14% and never warned. It is 150 of the 450 rows that
+        will actually be written: 33%."""
+        markets = [_Market(f"KXMVECROSSCATEGORY-{i}") for i in range(600)]
+        markets += [_Market(f"KXNEWMINT-{i}") for i in range(150)]
+        markets += [_Market(f"KX{i % 30}-{i}") for i in range(300)]
+
+        warnings = concentration_warnings(markets, threshold=0.25)
+
+        assert [w[0] for w in warnings] == ["KXNEWMINT"]
+        assert 0.33 < warnings[0][2] < 0.34

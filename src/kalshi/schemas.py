@@ -15,6 +15,10 @@ class KalshiMarket(BaseModel):
     status: str
     rules_primary: str = ""
     event_ticker: str = ""
+    # Kalshi's parlay (multivariate) collection, e.g. "KXMVECROSSCATEGORY-R".
+    # Null/absent on ordinary markets. Exclusion follows it, so a parlay
+    # minted under a new series name is still recognised as the same firehose.
+    mve_collection_ticker: Optional[str] = None
     # Structured contract terms. For threshold markets Kalshi publishes the
     # direction and the strike separately, which is the only non-guessing way
     # to tell ">90°" from "<83°" — the same city lists both on the same day.

@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 async def _fetch_and_sync(
     engine: Engine, settings: Settings, deadline: Deadline = None,
-    excluded: dict = None,
+    excluded: dict = None, concentration: list = None,
 ) -> int:
     deadline = deadline or Deadline.none("ingest")
     client = KalshiClient.from_settings(settings)
@@ -67,6 +67,10 @@ async def _fetch_and_sync(
                 "parlay mint it belongs in TRADING_EXCLUDED_SERIES",
                 series, 100 * share, count,
             )
+            # Also to the digest: a warning that lives only in a job log is
+            # read by nobody, which is how a sibling mint went unnoticed.
+            if concentration is not None:
+                concentration.append((series, count, share))
         markets = filter_ingestable(
             markets, excluded if excluded is not None else {},
         )
@@ -100,7 +104,7 @@ async def _fetch_and_sync(
 
 def ingest_live_markets(
     engine: Engine, settings: Settings, deadline: Deadline = None,
-    excluded: dict = None,
+    excluded: dict = None, concentration: list = None,
 ) -> int:
     try:
         loop = asyncio.get_running_loop()
@@ -113,10 +117,10 @@ def ingest_live_markets(
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as pool:
             count = pool.submit(
-                asyncio.run, _fetch_and_sync(engine, settings, deadline, excluded),
+                asyncio.run, _fetch_and_sync(engine, settings, deadline, excluded, concentration),
             ).result()
     else:
-        count = asyncio.run(_fetch_and_sync(engine, settings, deadline, excluded))
+        count = asyncio.run(_fetch_and_sync(engine, settings, deadline, excluded, concentration))
 
     logger.info(f"Ingested {count} live markets")
     return count

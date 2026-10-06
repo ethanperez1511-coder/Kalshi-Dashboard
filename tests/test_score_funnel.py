@@ -278,3 +278,19 @@ class TestRecorderSubscribeList:
             s.commit()
 
         assert markets_to_record(engine) == ["M-1"]
+
+
+def test_a_possible_mint_reaches_the_digest_headline():
+    """The concentration detector used to log and nothing else. The sibling
+    mint of 2026-10-06 was found by a human reading db_stats, not by it."""
+    from src.ev.funnel import ScoreFunnel
+
+    funnel = ScoreFunnel()
+    funnel.ingest_concentration = [("KXNEWMINT", 150, 0.333)]
+    assert "possible mint KXNEWMINT 33% of write (150)" in funnel.headline()
+
+
+def test_no_mint_means_no_mint_text():
+    from src.ev.funnel import ScoreFunnel
+
+    assert "mint" not in ScoreFunnel().headline()

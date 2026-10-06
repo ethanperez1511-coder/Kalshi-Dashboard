@@ -272,6 +272,7 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
 
     # Series the ingest refuses to persist, tallied so the filter stays visible.
     ingest_excluded: dict = {}
+    ingest_concentration: list = []
 
     # Seed demo data if offline, otherwise fetch live markets
     if settings.is_offline_mode:
@@ -282,6 +283,7 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
         ingest_deadline = Deadline(INGEST_BUDGET_SECONDS, "ingest")
         ingest_live_markets(
             engine, settings, deadline=ingest_deadline, excluded=ingest_excluded,
+            concentration=ingest_concentration,
         )
         if ingest_deadline.exceeded:
             overruns.append("ingest")
@@ -370,6 +372,7 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
     score_deadline = Deadline(SCORE_BUDGET_SECONDS, "scoring")
     funnel = ScoreFunnel()
     funnel.ingest_excluded = ingest_excluded
+    funnel.ingest_concentration = ingest_concentration
     results = score_all_markets(engine, deadline=score_deadline, funnel=funnel)
     if score_deadline.exceeded:
         overruns.append("scoring")
