@@ -24,11 +24,14 @@ from typing import List, Optional, Tuple
 from sqlalchemy import Engine, select, text
 
 from src.database import get_session
+# One source of truth for the cap and the budget. This file had its own copy of
+# the old 512 MiB tier, which kept the digest at "134% of tier" after Neon
+# doubled the cap.
+from src.maintenance.retention import NEON_CAP_BYTES, size_status
 from src.models.db_size import DbSizeSample
 
 logger = logging.getLogger(__name__)
 
-TIER_LIMIT_BYTES = 512 * 1024 * 1024
 
 # Enough days to average out one big prune without hiding a fresh firehose.
 TREND_DAYS = 7
@@ -95,7 +98,7 @@ def growth(engine: Engine, now: Optional[dt.datetime] = None) -> dict:
                 "mb_per_day": None, "days_to_full": None}
 
     bytes_per_day = (last_size - first_size) / span_days
-    headroom = TIER_LIMIT_BYTES - last_size
+    headroom = NEON_CAP_BYTES - last_size
     days_to_full = (
         headroom / bytes_per_day if bytes_per_day > 0 and headroom > 0 else None
     )
@@ -114,9 +117,7 @@ def format_growth(data: dict) -> str:
     if current is None:
         return "💾 DB: size unavailable (not postgres)"
 
-    used_mb = current / 1_048_576
-    pct = 100.0 * current / TIER_LIMIT_BYTES
-    line = f"💾 DB: {used_mb:.0f} MB ({pct:.0f}% of tier)"
+    line = f"💾 DB: {size_status(current)}"
 
     rate = data.get("mb_per_day")
     if rate is None:
@@ -125,7 +126,10 @@ def format_growth(data: dict) -> str:
     line += f", {rate:+.1f} MB/day over {data.get('span_days')}d"
     days = data.get("days_to_full")
     if days is not None and days < 30:
-        line += f"\n   ⚠️ FULL IN ~{days:.1f} DAYS at this rate"
+        line += (
+            f"\n   ⚠️ NEON CAP IN ~{days:.1f} DAYS at this rate — at the cap, "
+            f"writes AND deletes are refused"
+        )
     elif rate <= 0:
         line += " — shrinking"
     return line

@@ -14,13 +14,18 @@ import pytest
 from src.database import Base, get_session
 from src.ingestion.price_recorder import record_price_snapshot
 from src.maintenance.retention import (
-    DELTA_VALIDATION_DAYS,
+    CAP_ALARM_FRACTION,
+    DELTA_RETENTION_DAYS,
+    NEON_CAP_BYTES,
     SNAPSHOT_MAX_DAYS,
+    STORAGE_BUDGET_BYTES,
+    RetentionPlan,
     apply_retention,
     database_size_bytes,
-    delta_window_end,
+    format_plan,
     format_size_line,
     plan_retention,
+    prune_tape,
 )
 from src.models.orderbook_raw import OrderbookDeltaRaw
 from src.models.price import PriceSnapshot
@@ -109,7 +114,10 @@ class TestSnapshotRetention:
             assert {m for (m,) in s.query(PriceSnapshot.market_id).all()} == {"A", "B"}
 
 
-class TestDeltasAreProtected:
+class TestTapeRetention:
+    """Rolling-window behaviour is in test_retention_rolling.py. These pin the
+    mechanics: the plan counts what apply removes, and deletes are batched."""
+
     def _delta(self, engine, when):
         with get_session(engine) as s:
             s.add(OrderbookDeltaRaw(
@@ -118,53 +126,64 @@ class TestDeltasAreProtected:
             ))
             s.commit()
 
-    def test_deltas_inside_the_window_are_never_pruned(self, engine):
-        """Kalshi serves no historical book: a deleted delta cannot be
-        re-collected, so this refuses even under space pressure."""
-        self._delta(engine, NOW - dt.timedelta(days=5))
-        plan = plan_retention(engine, now=NOW)
-        assert any("PROTECTED" in note for note in plan.protected)
+    def test_plan_counts_exactly_what_apply_removes(self, engine):
+        for age in (DELTA_RETENTION_DAYS + 3, DELTA_RETENTION_DAYS + 1, 2):
+            self._delta(engine, NOW - dt.timedelta(days=age))
+        planned = plan_retention(engine, now=NOW).deletions["orderbook_tape_expired"]
+        applied = apply_retention(engine, now=NOW).deletions["orderbook_tape_expired"]
+        assert planned == applied == 2
 
-        apply_retention(engine, now=NOW)
+    def test_deletes_run_in_bounded_batches(self, engine, monkeypatch):
+        import src.maintenance.retention as retention
+
+        monkeypatch.setattr(retention, "DELETE_BATCH", 3)
+        for _ in range(10):
+            self._delta(engine, NOW - dt.timedelta(days=DELTA_RETENTION_DAYS + 1))
+        self._delta(engine, NOW)
+
+        assert prune_tape(engine, NOW) == 10
         with get_session(engine) as s:
             assert s.query(OrderbookDeltaRaw).count() == 1
 
-    def test_deltas_are_pruned_once_the_window_closes(self, engine):
-        """The guard must not be a permanent refusal, or it is untested."""
-        start = NOW - dt.timedelta(days=DELTA_VALIDATION_DAYS + 5)
-        self._delta(engine, start)
-        apply_retention(engine, now=NOW)
-        with get_session(engine) as s:
-            assert s.query(OrderbookDeltaRaw).count() == 0
-
-    def test_window_end_is_measured_from_the_first_delta(self, engine):
-        first = NOW - dt.timedelta(days=3)
-        self._delta(engine, first)
-        self._delta(engine, NOW)
-        assert delta_window_end(engine) == first + dt.timedelta(days=DELTA_VALIDATION_DAYS)
-
-    def test_no_deltas_means_no_window_and_no_pruning(self, engine):
-        assert delta_window_end(engine) is None
+    def test_the_window_is_never_wider_than_the_cap_can_hold(self):
+        """At the measured +49.5 MB/day, the window must fit inside the
+        budget with room for everything else. 60 days was ~3 GB."""
+        assert DELTA_RETENTION_DAYS * 49.5 * 1024 * 1024 < NEON_CAP_BYTES
 
 
-class TestSizeReporting:
+class TestBudgetAndCap:
+    """The cap is Neon's; the budget is ours. Neither may drift into the other."""
+
+    def test_the_budget_sits_well_under_the_cap(self):
+        """The September lesson: headroom. At least 40% of the cap stays
+        free when the budget is first breached."""
+        assert STORAGE_BUDGET_BYTES <= 0.6 * NEON_CAP_BYTES
+
+    def test_the_cap_is_the_current_neon_free_limit(self):
+        assert NEON_CAP_BYTES == 1024 ** 3
+
     def test_size_is_measured_not_estimated(self, engine):
         _snap(engine, "M", NOW)
         assert database_size_bytes(engine) > 0
 
-    def test_digest_line_warns_above_eighty_percent(self, engine):
-        from src.maintenance.retention import RetentionPlan
+    def test_under_budget_is_calm(self):
+        line = format_size_line(RetentionPlan(size_bytes=400 * 1024 * 1024))
+        assert line.startswith("💾")
 
-        plan = RetentionPlan(size_bytes=int(0.85 * 512 * 1024 * 1024))
-        assert "⚠️" in format_size_line(plan)
+    def test_over_budget_warns_long_before_the_cap(self):
+        plan = RetentionPlan(size_bytes=600 * 1024 * 1024)
+        assert plan.over_budget and not plan.cap_alarm
+        assert format_size_line(plan).startswith("⚠️")
 
-    def test_digest_line_escalates_above_ninety(self, engine):
-        from src.maintenance.retention import RetentionPlan
+    def test_near_the_cap_escalates(self):
+        plan = RetentionPlan(size_bytes=int(CAP_ALARM_FRACTION * NEON_CAP_BYTES) + 1)
+        assert format_size_line(plan).startswith("🚨")
+        assert "refuses writes AND deletes" in format_plan(plan, applied=True)
 
-        plan = RetentionPlan(size_bytes=int(0.95 * 512 * 1024 * 1024))
-        assert "🚨" in format_size_line(plan)
-
-    def test_healthy_size_is_not_alarming(self, engine):
-        from src.maintenance.retention import RetentionPlan
-
-        assert "💾" in format_size_line(RetentionPlan(size_bytes=50 * 1024 * 1024))
+    def test_todays_size_reads_against_both_numbers(self):
+        """721 MB was reported as '134% of free tier' against a stale 512 MiB
+        constant. It is over budget and 70% of the real cap."""
+        line = format_size_line(RetentionPlan(size_bytes=721 * 1024 * 1024))
+        assert "144% of 500 MB budget" in line
+        assert "70% of 1024 MB Neon cap" in line
+        assert line.startswith("⚠️")

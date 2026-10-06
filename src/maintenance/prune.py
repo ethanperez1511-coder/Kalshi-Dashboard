@@ -17,10 +17,13 @@ from src.maintenance.tape import (
     plan_compaction,
 )
 from src.maintenance.retention import (
-    EMERGENCY_FRACTION,
+    STORAGE_BUDGET_BYTES,
     apply_retention,
+    database_size_bytes,
     format_plan,
     plan_retention,
+    size_status,
+    vacuum_pruned_tables,
 )
 from src.run_summary import write_summary
 
@@ -58,18 +61,31 @@ def main(argv=None) -> int:
         logger.warning("Tape compaction failed (non-fatal)", exc_info=True)
         text += "\n\nTAPE COMPACTION FAILED — see logs"
 
-    # Still over the emergency line after pruning means ingest is outrunning
-    # retention, which retention cannot fix by trying harder.
-    over = plan.fraction >= EMERGENCY_FRACTION and not args.dry_run
+    # Plain VACUUM after both passes, so the space deletes and payload-nulling
+    # freed is reused rather than extended. Measured again afterwards: that is
+    # the number the budget is judged on.
+    if not args.dry_run:
+        try:
+            vacuumed = vacuum_pruned_tables(engine)
+            plan.size_bytes = database_size_bytes(engine)
+            if vacuumed:
+                text += f"\n\nVACUUM (ANALYZE): {', '.join(vacuumed)} — now {size_status(plan.size_bytes)}"
+        except Exception:
+            logger.error("VACUUM failed — freed space will not be reused", exc_info=True)
+            text += "\n\nVACUUM FAILED — see logs"
+
+    # Red means over OUR budget after pruning, which is well below the cap.
+    # The run goes red while half the cap is still free, not at the cap.
+    over = not args.dry_run and plan.size_bytes > STORAGE_BUDGET_BYTES
     write_summary(
-        f"Retention: {plan.size_bytes/1e6:.0f} MB ({plan.fraction:.0%} of tier), "
+        f"Retention: {size_status(plan.size_bytes)}, "
         f"{plan.total_deletions:,} rows removed",
         text, ok=not over,
     )
     if over:
         logger.error(
-            "Still above %.0f%% after pruning — the write rate, not retention, "
-            "is the problem", EMERGENCY_FRACTION * 100,
+            "Over the %.0f MB budget after pruning and VACUUM: %s",
+            STORAGE_BUDGET_BYTES / 1024 / 1024, size_status(plan.size_bytes),
         )
         return 1
     return 0

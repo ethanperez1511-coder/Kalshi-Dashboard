@@ -12,7 +12,8 @@ import datetime as dt
 import pytest
 
 from src.database import Base, get_session
-from src.db_growth import TIER_LIMIT_BYTES, format_growth, growth, record_sample
+from src.db_growth import format_growth, growth, record_sample
+from src.maintenance.retention import NEON_CAP_BYTES
 from src.models.db_size import DbSizeSample
 
 NOW = dt.datetime(2026, 8, 17, 12, 0, tzinfo=dt.timezone.utc)
@@ -89,7 +90,7 @@ class TestRate:
 class TestDaysToFull:
     def test_the_measured_emergency_reproduces(self, engine):
         """The real numbers: ~60 MB/day against ~126 MB of headroom."""
-        limit_mb = TIER_LIMIT_BYTES / MB
+        limit_mb = NEON_CAP_BYTES / MB
         _sample(engine, 2, limit_mb - 126 - 120)
         _sample(engine, 0, limit_mb - 126)
 
@@ -97,10 +98,10 @@ class TestDaysToFull:
 
         assert result["mb_per_day"] == pytest.approx(60.0)
         assert result["days_to_full"] == pytest.approx(2.1, abs=0.1)
-        assert "FULL IN" in format_growth(result)
+        assert "NEON CAP IN" in format_growth(result)
 
     def test_a_calm_database_gets_no_deadline_line(self, engine):
         _sample(engine, 7, 100)
         _sample(engine, 0, 101)
 
-        assert "FULL IN" not in format_growth(growth(engine, now=NOW))
+        assert "NEON CAP IN" not in format_growth(growth(engine, now=NOW))

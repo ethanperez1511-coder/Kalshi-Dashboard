@@ -12,6 +12,7 @@ name: maintenance
 #   retire_sha blank + CLOSE-LEGACY-POSITIONS -> unwind legacy positions
 #   retire_sha set   + RETIRE-DEPLOY-SHA      -> retire a deploy from the gate
 #   purge_markets    + PURGE-ORPHAN-MARKETS   -> delete dependency-free rows
+#   vacuum_full      + VACUUM-FULL-TAPE       -> rewrite pruned tables, return space
 # One token for both would mean confirming either confirms both.
 #
 # db_stats is the exception and takes no token: it is SELECT-only. It is
@@ -34,12 +35,17 @@ on:
         type: boolean
         required: false
         default: false
+      vacuum_full:
+        description: "Rewrite the pruned tables to return freed space to Neon (exclusive lock). Dry run unless confirm=VACUUM-FULL-TAPE."
+        type: boolean
+        required: false
+        default: false
       retire_sha:
         description: "Deploy SHA to retire from the gate (e.g. e807f8dd). Blank = legacy-position reconcile instead."
         required: false
         default: ""
       confirm:
-        description: "CLOSE-LEGACY-POSITIONS to unwind, RETIRE-DEPLOY-SHA to retire a deploy, PURGE-ORPHAN-MARKETS to purge. Blank for a dry run."
+        description: "CLOSE-LEGACY-POSITIONS to unwind, RETIRE-DEPLOY-SHA to retire a deploy, PURGE-ORPHAN-MARKETS to purge, VACUUM-FULL-TAPE to vacuum. Blank for a dry run."
         required: false
         default: ""
 
@@ -66,6 +72,7 @@ jobs:
           DB_STATS: ${{ inputs.db_stats }}
           DAY7: ${{ inputs.day7 }}
           PURGE_MARKETS: ${{ inputs.purge_markets }}
+          VACUUM_FULL: ${{ inputs.vacuum_full }}
           RETIRE_SHA: ${{ inputs.retire_sha }}
           CONFIRM: ${{ inputs.confirm }}
         # Inputs go through the environment, never interpolated into the shell
@@ -78,6 +85,8 @@ jobs:
             python -m src.execution.day7
           elif [ "$PURGE_MARKETS" = "true" ]; then
             python -m src.maintenance --purge-markets --confirm "$CONFIRM"
+          elif [ "$VACUUM_FULL" = "true" ]; then
+            python -m src.maintenance --vacuum-full --confirm "$CONFIRM"
           elif [ -n "$RETIRE_SHA" ]; then
             python -m src.maintenance --retire-sha "$RETIRE_SHA" --confirm "$CONFIRM"
           else

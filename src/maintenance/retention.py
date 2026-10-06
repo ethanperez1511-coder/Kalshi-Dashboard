@@ -11,13 +11,26 @@ cannot fix a write rate that high, so there are two halves:
   RETENTION  age out what remains, keeping recent data at full resolution and
              older data at reducing resolution.
 
-The orderbook deltas are the other pressure, and they have a hard constraint the
-snapshots do not: they cannot be re-collected. Kalshi serves no historical book,
-so a delta deleted inside the simulator's validation window is evidence that can
-never be recovered. Retention therefore REFUSES to touch deltas until that
-window has closed, even if the database is full — the correct response to
-running out of space is to say so, not to destroy the one dataset with no
-second source.
+The orderbook tape is the other pressure. It cannot be re-collected, because
+Kalshi serves no historical book, so it is kept for a ROLLING window of
+DELTA_RETENTION_DAYS measured back from now. That window covers everything
+replay and shadow read.
+
+It used to be anchored to the first recorded delta, `min(received_at) + 60 d`.
+That protected everything for sixty days, which at the measured +49.5 MB/day is
+about 3 GB against the cap. On day sixty it then deleted the whole tape in one
+statement, recent days included, and re-anchored. The database hit the cap on
+2026-09-11 and Neon refused every write, retention's own DELETEs included,
+until the cap was raised on 2026-10-01: twenty days dark. Ruling 2026-10-06:
+the window rolls.
+
+Two sizes, kept apart on purpose:
+
+  NEON_CAP_BYTES        the provider's hard limit. At it, writes AND deletes
+                        are refused and cleanup deadlocks. A fact, not a choice.
+  STORAGE_BUDGET_BYTES  our target, well under the cap. Retention goes red when
+                        it cannot hold this, so the warning arrives with half
+                        the cap still free. September's lesson is headroom.
 """
 from __future__ import annotations
 
@@ -32,10 +45,15 @@ from src.database import get_session
 
 logger = logging.getLogger(__name__)
 
-# Neon free tier.
-TIER_LIMIT_BYTES = 512 * 1024 * 1024
-WARN_FRACTION = 0.80
-EMERGENCY_FRACTION = 0.90
+MB = 1024 * 1024
+
+# Neon Free plan cap, raised from 0.5 GB to 1 GB on 2026-10-02 (changelog).
+NEON_CAP_BYTES = 1024 * 1024 * 1024
+# Our own ceiling. Red above this, after pruning.
+STORAGE_BUDGET_BYTES = 500 * 1024 * 1024
+# Fraction of the CAP at which the digest escalates to 🚨. Past here the next
+# few days of growth can deadlock cleanup.
+CAP_ALARM_FRACTION = 0.85
 
 # Price snapshots: full resolution recently, then one per market per hour, then
 # one per market per day, then gone.
@@ -43,26 +61,37 @@ SNAPSHOT_FULL_DAYS = 3
 SNAPSHOT_HOURLY_DAYS = 14
 SNAPSHOT_MAX_DAYS = 60
 
-# Orderbook deltas: never pruned inside the validation window. The window is
-# day-zero (first recorded delta) plus this, generously beyond the ~30 days the
-# design expects to need.
-DELTA_VALIDATION_DAYS = 60
+# Orderbook tape (deltas, snapshots, trade prints): kept for this many days
+# measured back from NOW. It equals the compaction and replay window, so
+# nothing that replay or shadow reads is ever pruned.
+DELTA_RETENTION_DAYS = 14
+
+# Rows per DELETE. A killed run leaves a smaller job behind, not a rolled-back
+# hour.
+DELETE_BATCH = 10_000
+
+# Tables retention deletes from. Plain VACUUM runs on these after every pass so
+# freed pages are reused instead of the files growing.
+PRUNED_TABLES = ("price_snapshots", "orderbook_delta_raw")
 
 
 @dataclass
 class RetentionPlan:
     size_bytes: int = 0
-    limit_bytes: int = TIER_LIMIT_BYTES
     deletions: Dict[str, int] = field(default_factory=dict)
     protected: List[str] = field(default_factory=list)
 
     @property
-    def fraction(self) -> float:
-        return self.size_bytes / self.limit_bytes if self.limit_bytes else 0.0
+    def cap_fraction(self) -> float:
+        return self.size_bytes / NEON_CAP_BYTES
 
     @property
-    def over_warn(self) -> bool:
-        return self.fraction >= WARN_FRACTION
+    def over_budget(self) -> bool:
+        return self.size_bytes > STORAGE_BUDGET_BYTES
+
+    @property
+    def cap_alarm(self) -> bool:
+        return self.cap_fraction >= CAP_ALARM_FRACTION
 
     @property
     def total_deletions(self) -> int:
@@ -84,23 +113,10 @@ def database_size_bytes(engine: Engine) -> int:
     return int(pages) * int(page_size)
 
 
-def delta_window_end(engine: Engine) -> Optional[dt.datetime]:
-    """When the orderbook deltas stop being protected.
-
-    None means no deltas exist yet, which is also a refusal to prune: there is
-    nothing to prune and no window to reason about.
-    """
-    from src.models.orderbook_raw import OrderbookDeltaRaw
-
-    with get_session(engine) as session:
-        first = session.execute(
-            select(func.min(OrderbookDeltaRaw.received_at))
-        ).scalar()
-    if first is None:
-        return None
-    if first.tzinfo is None:
-        first = first.replace(tzinfo=dt.timezone.utc)
-    return first + dt.timedelta(days=DELTA_VALIDATION_DAYS)
+def tape_cutoff(now: dt.datetime) -> dt.datetime:
+    """Tape received before this is pruned. Rolls with the clock and never
+    depends on what is in the table."""
+    return now - dt.timedelta(days=DELTA_RETENTION_DAYS)
 
 
 def plan_retention(engine: Engine, now: Optional[dt.datetime] = None) -> RetentionPlan:
@@ -130,23 +146,66 @@ def plan_retention(engine: Engine, now: Optional[dt.datetime] = None) -> Retenti
             .where(PriceSnapshot.timestamp >= max_before)
         ).scalar() or 0
 
-    window_end = delta_window_end(engine)
-    if window_end is None:
-        plan.protected.append("orderbook deltas: none recorded")
-    elif now < window_end:
-        remaining = (window_end - now).days
-        plan.protected.append(
-            f"orderbook deltas: PROTECTED for {remaining} more days — Kalshi "
-            f"serves no historical book, so a deleted delta cannot be recovered"
-        )
-    else:
-        with get_session(engine) as session:
-            plan.deletions["orderbook_deltas_expired"] = session.execute(
-                select(func.count(OrderbookDeltaRaw.id))
-                .where(OrderbookDeltaRaw.received_at < window_end)
-            ).scalar() or 0
+        plan.deletions["orderbook_tape_expired"] = session.execute(
+            select(func.count(OrderbookDeltaRaw.id))
+            .where(OrderbookDeltaRaw.received_at < tape_cutoff(now))
+        ).scalar() or 0
 
+    plan.protected.append(
+        f"orderbook tape: last {DELTA_RETENTION_DAYS} days kept (rolling) — "
+        f"Kalshi serves no historical book, so this is the only copy"
+    )
     return plan
+
+
+def prune_tape(engine: Engine, now: dt.datetime) -> int:
+    """Delete tape older than the rolling window, DELETE_BATCH rows at a time.
+
+    Each batch commits on its own, so a run killed halfway has still removed
+    what it got through. It selects by the indexed received_at, so no batch
+    scans the table.
+    """
+    from src.models.orderbook_raw import OrderbookDeltaRaw
+
+    cutoff = tape_cutoff(now)
+    deleted = 0
+    while True:
+        with get_session(engine) as session:
+            ids = [
+                row[0] for row in session.execute(
+                    select(OrderbookDeltaRaw.id)
+                    .where(OrderbookDeltaRaw.received_at < cutoff)
+                    .limit(DELETE_BATCH)
+                ).all()
+            ]
+            if not ids:
+                return deleted
+            result = session.execute(
+                OrderbookDeltaRaw.__table__.delete()
+                .where(OrderbookDeltaRaw.id.in_(ids))
+            )
+            session.commit()
+            deleted += result.rowcount or 0
+
+
+def vacuum_pruned_tables(engine: Engine) -> List[str]:
+    """Plain VACUUM (ANALYZE) on the tables retention deletes from.
+
+    DELETE only marks rows dead. VACUUM makes their space reusable, so the
+    next day's writes fill it instead of extending the files. Autovacuum would
+    do this eventually, but only while the compute is awake, and on a
+    scale-to-zero database that is not often enough to count on. Plain VACUUM
+    takes no exclusive lock, so the recorder and trade cycle keep running.
+    It does NOT shrink the files: that takes VACUUM FULL, which is a separate,
+    token-gated maintenance action.
+    """
+    if engine.dialect.name != "postgresql":
+        return []
+    # VACUUM cannot run inside a transaction block.
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        for table in PRUNED_TABLES:
+            conn.execute(text(f"VACUUM (ANALYZE) {table}"))
+    return list(PRUNED_TABLES)
 
 
 def apply_retention(engine: Engine, now: Optional[dt.datetime] = None) -> RetentionPlan:
@@ -154,7 +213,6 @@ def apply_retention(engine: Engine, now: Optional[dt.datetime] = None) -> Retent
     now = now or dt.datetime.now(dt.timezone.utc)
     plan = plan_retention(engine, now)
 
-    from src.models.orderbook_raw import OrderbookDeltaRaw
     from src.models.price import PriceSnapshot
 
     full_before = now - dt.timedelta(days=SNAPSHOT_FULL_DAYS)
@@ -183,46 +241,52 @@ def apply_retention(engine: Engine, now: Optional[dt.datetime] = None) -> Retent
             ~PriceSnapshot.id.in_(keep),
         ).delete(synchronize_session=False)
 
-        # 3. Deltas, only once their window has closed.
-        window_end = delta_window_end(engine)
-        if window_end is not None and now >= window_end:
-            session.query(OrderbookDeltaRaw).filter(
-                OrderbookDeltaRaw.received_at < window_end
-            ).delete(synchronize_session=False)
-
         session.commit()
+
+    # 3. Tape older than the rolling window, in batches.
+    plan.deletions["orderbook_tape_expired"] = prune_tape(engine, now)
 
     plan.size_bytes = database_size_bytes(engine)
     logger.info(
-        "Retention applied: %d rows removed, now %.1f%% of tier",
-        plan.total_deletions, plan.fraction * 100,
+        "Retention applied: %d rows removed, now %.0f MB (%.0f%% of cap)",
+        plan.total_deletions, plan.size_bytes / MB, plan.cap_fraction * 100,
     )
     return plan
 
 
+def size_status(size_bytes: int) -> str:
+    """Budget and cap in one phrase, so neither number appears alone."""
+    return (
+        f"{size_bytes / MB:.0f} MB — {size_bytes / STORAGE_BUDGET_BYTES:.0%} of "
+        f"{STORAGE_BUDGET_BYTES / MB:.0f} MB budget, "
+        f"{size_bytes / NEON_CAP_BYTES:.0%} of {NEON_CAP_BYTES / MB:.0f} MB Neon cap"
+    )
+
+
 def format_plan(plan: RetentionPlan, applied: bool = False) -> str:
-    used = plan.size_bytes / 1e6
-    limit = plan.limit_bytes / 1e6
     lines = [
-        f"{'Applied' if applied else 'Planned'} retention — "
-        f"{used:.0f}/{limit:.0f} MB ({plan.fraction:.0%} of tier)"
+        f"{'Applied' if applied else 'Planned'} retention — {size_status(plan.size_bytes)}"
     ]
     for name, count in sorted(plan.deletions.items()):
         if count:
             lines.append(f"  {'removed' if applied else 'would remove'} {count:,} {name}")
     for note in plan.protected:
         lines.append(f"  {note}")
-    if plan.fraction >= EMERGENCY_FRACTION:
-        lines.append("  🚨 above 90% — ingest will outrun retention")
-    elif plan.over_warn:
-        lines.append("  ⚠️ above 80% of the free tier")
+    if plan.cap_alarm:
+        lines.append(
+            f"  🚨 at {plan.cap_fraction:.0%} of the Neon cap — at 100% Neon "
+            f"refuses writes AND deletes, and retention cannot run"
+        )
+    elif plan.over_budget:
+        lines.append(
+            "  ⚠️ over budget after pruning. If the live rows fit, the space is "
+            "dead pages: dispatch maintenance vacuum_full. If not, the write "
+            "rate is the problem"
+        )
     return "\n".join(lines)
 
 
 def format_size_line(plan: RetentionPlan) -> str:
     """One line for the daily digest."""
-    used = plan.size_bytes / 1e6
-    mark = "🚨" if plan.fraction >= EMERGENCY_FRACTION else (
-        "⚠️" if plan.over_warn else "💾"
-    )
-    return f"{mark} DB: {used:.0f} MB ({plan.fraction:.0%} of free tier)"
+    mark = "🚨" if plan.cap_alarm else ("⚠️" if plan.over_budget else "💾")
+    return f"{mark} DB: {size_status(plan.size_bytes)}"

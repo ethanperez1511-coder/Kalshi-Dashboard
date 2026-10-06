@@ -7,6 +7,8 @@
     python -m src.maintenance --confirm CLOSE-LEGACY-POSITIONS
     python -m src.maintenance --retire-sha e807f8dd
     python -m src.maintenance --retire-sha e807f8dd --confirm RETIRE-DEPLOY-SHA
+    python -m src.maintenance --vacuum-full                         # dry run
+    python -m src.maintenance --vacuum-full --confirm VACUUM-FULL-TAPE
 
 The two destructive actions have separate confirmation tokens on purpose. One
 token for two destructive operations means confirming either confirms both.
@@ -47,6 +49,12 @@ from src.maintenance.retire_deploy import (
     format_plan as format_retirement,
     plan_retirement,
 )
+from src.maintenance.vacuum_full import (
+    CONFIRM_TOKEN as VACUUM_TOKEN,
+    execute_vacuum,
+    format_plan as format_vacuum,
+    plan_vacuum,
+)
 from src.report_guard import publish_report
 from src.run_summary import write_summary
 
@@ -74,6 +82,13 @@ def main(argv=None) -> int:
         ),
     )
     parser.add_argument(
+        "--vacuum-full", action="store_true",
+        help=(
+            "Rewrite the pruned tables to return freed space to Neon. "
+            f"Dry run unless --confirm {VACUUM_TOKEN}"
+        ),
+    )
+    parser.add_argument(
         "--db-stats", action="store_true",
         help="Read-only census of table sizes, market statuses and growth rates.",
     )
@@ -89,6 +104,9 @@ def main(argv=None) -> int:
 
     if args.purge_markets:
         return _purge(engine, args.confirm.strip())
+
+    if args.vacuum_full:
+        return _vacuum_full(engine, args.confirm.strip())
 
     shas = [s for s in (args.retire_shas or []) if s and s.strip()]
     if shas:
@@ -171,6 +189,42 @@ def _purge(engine, token: str) -> int:
         if executed else
         f"Purge DRY RUN: would delete {plan.deletable:,}, "
         f"archive {plan.archivable:,}, exempt {plan.exempt:,}"
+    )
+    write_summary(headline, text[:4000], ok=True)
+    return 0
+
+
+def _vacuum_full(engine, token: str) -> int:
+    """Rewrite the pruned tables. Dry run unless the token matches exactly."""
+    if token and token != VACUUM_TOKEN:
+        # Covers both a typo and another action's token: neither authorises
+        # an exclusive-lock rewrite.
+        logger.error(
+            "Confirmation token did not match. Expected %r, got %r. "
+            "Nothing was changed.", VACUUM_TOKEN, token,
+        )
+        write_summary("VACUUM FULL: BAD CONFIRM TOKEN — nothing changed", ok=False)
+        return 2
+
+    plan = plan_vacuum(engine)
+    executed = execute_vacuum(engine, plan) if token == VACUUM_TOKEN else None
+    text = format_vacuum(plan, executed)
+    print(text)
+
+    if executed is not None and plan.refused:
+        # Executing and skipping a table is a partial result, so the run must
+        # not read green.
+        write_summary(
+            f"VACUUM FULL: refused {', '.join(plan.refused)} — not enough headroom",
+            text[:4000], ok=False,
+        )
+        return 1
+
+    headline = (
+        f"VACUUM FULL EXECUTED: {sum(executed.values()) / 1024 / 1024:.0f} MB reclaimed"
+        if executed is not None else
+        f"VACUUM FULL DRY RUN: {len(plan.tables)} tables, "
+        f"{len(plan.refused)} refused by the space guard"
     )
     write_summary(headline, text[:4000], ok=True)
     return 0
