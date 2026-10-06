@@ -67,24 +67,33 @@ class TestTheInvariantHolds:
 
 
 class TestCadenceMatchesTheSession:
-    """Cycles run inside the market session (2026-10-06), which sets the
-    cadence itself. The workflow cron no longer states it, so the session must
-    take it from configuration, and no other schedule may run cycles."""
+    """Cycles run inside the market session (2026-10-06), which takes its
+    cadence from configuration. trade.yml keeps a */N BACKSTOP schedule until
+    the session has proven itself (L32; exit criterion in tasks/todo.md), and
+    that cron must state the same cadence. Only the session records the book."""
 
     def test_the_session_cadence_is_the_configured_one(self):
         from src import session, trading_config
 
         assert session.CYCLE_SECONDS == trading_config.CYCLE_MINUTES * 60
 
-    def test_no_other_workflow_schedules_trade_cycles(self):
+    def test_the_backstop_cron_states_the_configured_cadence(self, config):
+        import pathlib
+        import re
+
+        text = pathlib.Path(".github/workflows/trade.yml").read_text()
+        match = re.search(r'cron:\s*"\*/(\d+) \* \* \* \*"', text)
+        assert match, "trade.yml backstop schedule missing (L32: keep it until the exit criterion)"
+        assert int(match.group(1)) == config().CYCLE_MINUTES
+
+    def test_only_the_session_records_the_book(self):
         import pathlib
 
         import yaml
 
-        for name in ("trade.yml", "book-recorder.yml"):
-            doc = yaml.safe_load(pathlib.Path(".github/workflows", name).read_text())
-            triggers = doc.get("on", doc.get(True))     # YAML 1.1 reads `on` as True
-            assert "schedule" not in triggers, f"{name} schedules runs outside the session"
+        doc = yaml.safe_load(pathlib.Path(".github/workflows/book-recorder.yml").read_text())
+        triggers = doc.get("on", doc.get(True))     # YAML 1.1 reads `on` as True
+        assert "schedule" not in triggers
 
     def test_the_job_timeout_still_fits_inside_one_interval(self, config):
         """A job outliving its interval queues the next one behind it."""

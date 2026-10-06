@@ -3,9 +3,14 @@ name: paper-trade-cycle
 # Runs ONE pipeline cycle, on demand. Scheduled cycles now run inside the daily
 # market session (session.yml). State lives in Neon Postgres (DATABASE_URL secret).
 on:
-  # No schedule: cycles run inside the daily market session (session.yml,
-  # 15:00–21:00 UTC, ruling 2026-10-06). This keeps the manual button for
-  # verification; the cycle lock refuses it if a session cycle is running.
+  # BACKSTOP (L32, ruling 2026-10-06). Cycles run inside the daily market
+  # session (session.yml), but the session's own triggers did not fire on its
+  # first day. This schedule stays until the exit criterion in tasks/todo.md
+  # is met: 7 consecutive green session days with the watchdog green. It is
+  # removed in its own commit. Overlap is safe: the cycle lock in the database
+  # makes a backstop cycle that meets a session cycle skip, green, untouched.
+  schedule:
+    - cron: "*/15 * * * *"  # every 15 min — see TRADING_CYCLE_MINUTES
   workflow_dispatch: {}
 
 # One cycle at a time. Never cancel a running cycle mid-trade (would risk a partial
@@ -64,4 +69,7 @@ jobs:
           # would have silently done nothing at all.
           TRADING_SHADOW_MAKER_ENABLED: ${{ vars.TRADING_SHADOW_MAKER_ENABLED }}
           TRADING_EXCLUDED_SERIES: ${{ vars.TRADING_EXCLUDED_SERIES }}
+          # Dead-man's switch: pinged after each successful cycle. A URL, not
+          # a credential; unset renders empty, which means "no ping".
+          DEADMAN_PING_URL: ${{ secrets.DEADMAN_PING_URL }}
         run: python -m src.run_trading   # single cycle (NO --loop)
