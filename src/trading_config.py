@@ -150,7 +150,13 @@ TRANSFER_WARN_FRACTION: float = _env_float("TRADING_TRANSFER_WARN_FRACTION", 0.7
 # holds a connection ~55 min of every hour — so it keeps the database awake
 # round-the-clock and dominates this axis. The 5->15 minute cadence change that
 # fixed transfer barely moves it.
+#
+# The quota is in CU-HOURS: awake time multiplied by compute size. This
+# project autoscales 0.25<->2 CU and sits at the floor, so an awake hour bills
+# ~0.25 CU-h. Reporting wall hours as the bill overstated it ~6x (2026-10-06:
+# ~49 "h" in the digest, 7.69 CU-h in the console).
 COMPUTE_QUOTA_HOURS: float = _env_float("TRADING_COMPUTE_QUOTA_HOURS", 100.0)
+NEON_MIN_CU: float = _env_float("TRADING_NEON_MIN_CU", 0.25)
 # Rough active time per pipeline cycle, for the estimate only.
 CYCLE_COMPUTE_MINUTES: float = _env_float("TRADING_CYCLE_COMPUTE_MINUTES", 1.5)
 

@@ -38,6 +38,7 @@ from src.trading_config import (
     COMPUTE_QUOTA_HOURS,
     CYCLE_COMPUTE_MINUTES,
     CYCLE_MINUTES,
+    NEON_MIN_CU,
     TRANSFER_QUOTA_GB,
     TRANSFER_WARN_FRACTION,
 )
@@ -218,27 +219,36 @@ def compute_estimate(engine: Engine, now: Optional[dt.datetime] = None) -> dict:
     # Cycles add compute only when the recorder is not already holding the
     # connection open, which on current schedules is most of the time.
     cycle_hours = days * (1440 / CYCLE_MINUTES) * CYCLE_COMPUTE_MINUTES / 60.0
-    total = max(recorder_hours, 0) + cycle_hours
+    awake = max(recorder_hours, 0) + cycle_hours
+
+    # Both awake terms over-count: an hour bucket counts a 55-minute run that
+    # straddles :00 twice, and cycles are assumed at the nominal cadence when
+    # GitHub delivers far fewer. Multiplied by the floor CU, this lands ABOVE
+    # the bill (13.4 vs the console's 7.69 on 2026-10-06), which is the safe
+    # side for a number whose job is to show a deadline coming.
+    cu_hours = awake * NEON_MIN_CU
 
     return {
         "recorder_hours": recorder_hours,
         "cycle_hours": round(cycle_hours, 1),
-        "total_hours": round(total, 1),
+        "awake_hours": round(awake, 1),
+        "cu_hours": round(cu_hours, 1),
         "quota_hours": COMPUTE_QUOTA_HOURS,
-        "fraction": total / COMPUTE_QUOTA_HOURS if COMPUTE_QUOTA_HOURS else 0.0,
+        "fraction": cu_hours / COMPUTE_QUOTA_HOURS if COMPUTE_QUOTA_HOURS else 0.0,
     }
 
 
 def format_compute(data: dict) -> str:
     pct = 100.0 * data["fraction"]
     line = (
-        f"🖥 Compute: ~{data['total_hours']:.0f} h month-to-date "
-        f"({pct:.0f}% of {data['quota_hours']:.0f} h) — "
-        f"recorder {data['recorder_hours']}h + cycles {data['cycle_hours']}h"
+        f"🖥 Compute: ≤~{data['cu_hours']:.0f} CU-h month-to-date est. "
+        f"({pct:.0f}% of {data['quota_hours']:.0f} CU-h) — awake "
+        f"{data['awake_hours']:.0f} h x {NEON_MIN_CU} CU floor; "
+        f"Neon console is the meter"
     )
     if data["fraction"] >= TRANSFER_WARN_FRACTION:
         line += (
-            "\n   ⚠️ The recorder holds a connection ~55 min/hour, so it keeps "
-            "the compute awake round-the-clock. Cadence does not fix this axis."
+            "\n   ⚠️ Check the console before acting: this estimate runs "
+            "high. At 100% Neon suspends compute until the next period."
         )
     return line

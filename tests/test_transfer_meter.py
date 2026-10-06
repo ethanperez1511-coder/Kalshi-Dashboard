@@ -116,3 +116,44 @@ class TestReporting:
 
         assert data["days"] == 1
         assert data["fraction"] < 0.1
+
+
+class TestComputeIsReportedInCuHours:
+    """Neon bills CU-hours: awake time x compute size, at a 0.25 CU floor here.
+    The digest reported awake WALL hours as if they were the bill, and was ~6x
+    high against the console (2026-10-06: ~49 "h" in the digest, 7.69 CU-h in
+    the console, 0.25<->2 CU autoscaling)."""
+
+    def _october_6(self, engine):
+        """The inputs behind the 2026-10-06 digest: 39 recorded hours over six
+        sampled days, measured October 1-6."""
+        from src.models.orderbook_raw import OrderbookDeltaRaw
+
+        start = dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc)
+        with get_session(engine) as s:
+            for h in range(39):
+                s.add(OrderbookDeltaRaw(
+                    market_ticker="M", msg_type="delta", sid=1, seq=h, payload="{}",
+                    received_at=start + dt.timedelta(hours=h * 3),
+                ))
+            for d in range(6):
+                s.add(TransferSample(sampled_on=(start + dt.timedelta(days=d)).date()))
+            s.commit()
+        return dt.datetime(2026, 10, 6, 12, tzinfo=dt.timezone.utc)
+
+    def test_the_estimate_brackets_the_console_from_above(self, engine):
+        """At the 0.25 CU floor the estimate must not undershoot the bill, or
+        it hides the deadline it exists to show, and must not be the 6x
+        overstatement that turned a non-problem into an emergency."""
+        now = self._october_6(engine)
+        data = transfer_meter.compute_estimate(engine, now=now)
+
+        console = 7.69
+        assert console <= data["cu_hours"] <= 2 * console
+
+    def test_the_line_names_the_unit_and_the_authority(self, engine):
+        line = transfer_meter.format_compute(
+            transfer_meter.compute_estimate(engine, now=self._october_6(engine))
+        )
+        assert "CU-h" in line
+        assert "console" in line
