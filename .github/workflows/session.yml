@@ -1,0 +1,74 @@
+name: market-session
+
+# The daily market session, 15:00–21:00 UTC: the book recorder and a trade cycle
+# every 15 minutes, inside ONE job (src/session.py). Ruling 2026-10-06.
+#
+# Why not two crons: GitHub delivered ~5–8 scheduled runs a day against the 96
+# and 24 asked for, 4–8 hours late. Here a cron only has to START a link once;
+# the link sets its own cadence. Several triggers, because any of them may be
+# dropped or delayed; the first to land wins and the rest queue behind it and
+# exit when they see the window closed.
+#
+# A link lives at most 5h40m (hosted jobs die at 6h), so every day is at least
+# two links. A link that cannot finish the window dispatches its successor
+# through workflow_dispatch, the one event GITHUB_TOKEN may trigger.
+#
+# Outside the window there are NO trade cycles: trade.yml and book-recorder.yml
+# keep only their manual buttons. A manual cycle during a session is harmless:
+# the cycle lock in the database refuses the second one.
+on:
+  schedule:
+    - cron: "0 13 * * *"
+    - cron: "40 13 * * *"
+    - cron: "20 14 * * *"
+    - cron: "0 15 * * *"
+    - cron: "40 15 * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: market-session
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write      # to dispatch the successor link
+
+jobs:
+  session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install .
+      - name: Apply pending schema migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.migrate
+      - name: Run the session link
+        env:
+          # Same data-only secrets and variables as trade.yml. NONE enables
+          # live mode — `mode` lives in the DB and defaults to 'paper'.
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          KALSHI_API_KEY: ${{ secrets.KALSHI_API_KEY }}
+          KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY_B64 }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          TRADING_SHADOW_MAKER_ENABLED: ${{ vars.TRADING_SHADOW_MAKER_ENABLED }}
+          TRADING_EXCLUDED_SERIES: ${{ vars.TRADING_EXCLUDED_SERIES }}
+          GITHUB_TOKEN: ${{ github.token }}
+          SESSION_WORKFLOW: session.yml
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python -m src.session
+      - name: Alert on failure
+        if: failure()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ALERT_TEXT: "🚨 <b>MARKET SESSION FAILED</b> — a link crashed or a cycle failed; trading may be paused until the next link."
+        run: python -m src.alert_live_failure

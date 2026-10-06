@@ -1,12 +1,12 @@
 name: paper-trade-cycle
 
-# Runs ONE pipeline cycle per tick. Cron is the interval — no --loop, no long-lived
-# process to run out of resources. State lives in Neon Postgres (DATABASE_URL secret).
-# A failed run emails the repo owner = built-in death alert.
+# Runs ONE pipeline cycle, on demand. Scheduled cycles now run inside the daily
+# market session (session.yml). State lives in Neon Postgres (DATABASE_URL secret).
 on:
-  schedule:
-    - cron: "*/15 * * * *"  # every 15 min — see TRADING_CYCLE_MINUTES
-  workflow_dispatch: {}      # manual "Run workflow" button for verification
+  # No schedule: cycles run inside the daily market session (session.yml,
+  # 15:00–21:00 UTC, ruling 2026-10-06). This keeps the manual button for
+  # verification; the cycle lock refuses it if a session cycle is running.
+  workflow_dispatch: {}
 
 # One cycle at a time. Never cancel a running cycle mid-trade (would risk a partial
 # write / double-execution against the single-writer Postgres DB). Extra ticks queue.

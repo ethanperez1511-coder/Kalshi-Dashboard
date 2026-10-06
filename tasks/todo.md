@@ -1936,3 +1936,31 @@ transfer 44.86 MB, autoscale 0.25<->2 CU.
   alert on change.
 - Liquidity rewards: CLOSED. Reopening condition: a new KXHIGH* program in
   GET /incentive_programs, rechecked weekly in the digest.
+
+## P1 — session job (rulings 2026-10-06 stand), BUILD PLAN
+- [ ] `src/session.py`: one job, 15:00–21:00 UTC. A recorder subprocess,
+      restarted hourly (fresh subscribe list fixes Bug D), plus
+      `python -m src.run_trading` every 15 min, each cycle a fresh process
+      exactly as today. Pure `plan_link(now, started)` decides wait / run /
+      chain / exit, and is unit-tested.
+- [ ] `session.yml`: five cron triggers 13:00–15:30 under one concurrency
+      group. Each link stops ≤ 5h40m after it started (the hosted-job limit is
+      6h) and, if the window is not done, dispatches its successor via
+      workflow_dispatch (GITHUB_TOKEN may trigger workflow_dispatch). A
+      duplicate trigger queued behind a finished session sees the window
+      closed and exits.
+- [ ] `session-watchdog.yml`: crons at 16:05/16:35/17:05. Telegram alert if
+      no session run is in progress or has run today (GitHub API, no Neon
+      wake). The same job re-enables every workflow, so the 60-day inactivity
+      rule never fires (daily, a superset of the monthly ruling; idempotent).
+- [ ] trade.yml / book-recorder.yml: schedules REMOVED (zero off-session
+      cycles); workflow_dispatch kept.
+- [ ] Heartbeat: due once per UTC calendar date, not 24h after the last.
+- [ ] Cycle lock: `pg_try_advisory_lock` around the cycle. A second cycle (a
+      manual dispatch during a session) exits without touching the DB.
+- Safety: no risk constant, sizing, mode or live-gate code touched; each
+      cycle is the same `run_trading` process with the same env. Over-exposure:
+      unchanged per-trade limits, and fewer cycles, not more. Accidental live:
+      `mode` is untouched (DB-only, default paper). DB corruption: the new lock
+      makes concurrent cycles impossible, where before only a GitHub
+      concurrency group stood between them.

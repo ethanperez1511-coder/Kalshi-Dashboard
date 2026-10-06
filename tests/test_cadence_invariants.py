@@ -66,18 +66,25 @@ class TestTheInvariantHolds:
         assert cfg.MAX_SNAPSHOT_AGE_MINUTES == 999
 
 
-class TestCadenceMatchesTheWorkflow:
-    def test_the_cron_and_the_config_agree(self, config):
-        """Two places state the cadence; disagreement is silent and lasting."""
+class TestCadenceMatchesTheSession:
+    """Cycles run inside the market session (2026-10-06), which sets the
+    cadence itself. The workflow cron no longer states it, so the session must
+    take it from configuration, and no other schedule may run cycles."""
+
+    def test_the_session_cadence_is_the_configured_one(self):
+        from src import session, trading_config
+
+        assert session.CYCLE_SECONDS == trading_config.CYCLE_MINUTES * 60
+
+    def test_no_other_workflow_schedules_trade_cycles(self):
         import pathlib
-        import re
 
-        cfg = config()
-        text = pathlib.Path(".github/workflows/trade.yml").read_text()
-        match = re.search(r'cron:\s*"\*/(\d+) \* \* \* \*"', text)
+        import yaml
 
-        assert match, "trade.yml no longer uses a */N minute cron"
-        assert int(match.group(1)) == cfg.CYCLE_MINUTES
+        for name in ("trade.yml", "book-recorder.yml"):
+            doc = yaml.safe_load(pathlib.Path(".github/workflows", name).read_text())
+            triggers = doc.get("on", doc.get(True))     # YAML 1.1 reads `on` as True
+            assert "schedule" not in triggers, f"{name} schedules runs outside the session"
 
     def test_the_job_timeout_still_fits_inside_one_interval(self, config):
         """A job outliving its interval queues the next one behind it."""

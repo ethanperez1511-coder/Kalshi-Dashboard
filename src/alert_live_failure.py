@@ -27,14 +27,16 @@ from src.run_summary import write_summary
 
 def main() -> int:
     run_url = os.environ.get("RUN_URL", "(no run url)")
-    alerter = Alerter()
-    delivered = alerter.send(
+    # Other workflows reuse this step. Each names its own failure, so a dead
+    # session never pages as "LIVE CHECKS FAILED".
+    body = os.environ.get("ALERT_TEXT") or (
         "🚨 <b>LIVE CHECKS FAILED</b>\n"
         "An upstream contract may have changed under us — settlement station, "
         "MOS availability, or contract terms.\n"
-        "Weather pricing should be treated as suspect until this is read.\n"
-        f"{run_url}"
+        "Weather pricing should be treated as suspect until this is read."
     )
+    alerter = Alerter()
+    delivered = alerter.send(f"{body}\n{run_url}")
 
     if delivered:
         write_summary(f"Live-checks failure alert delivered to Telegram\n\n{run_url}")

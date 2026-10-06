@@ -9,8 +9,8 @@ name: book-recorder
 # day of validation window that never exists. That is why it runs before the
 # simulator that consumes it.
 on:
-  schedule:
-    - cron: "2 * * * *"
+  # No schedule: the recorder runs inside the daily market session
+  # (session.yml, 15:00–21:00 UTC, ruling 2026-10-06). Manual button kept.
   workflow_dispatch: {}
 
 concurrency:
@@ -40,4 +40,5 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ALERT_TEXT: "🚨 <b>BOOK RECORDER FAILED</b> (manual run)."
         run: python -m src.alert_live_failure
