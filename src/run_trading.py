@@ -52,6 +52,7 @@ from src.portfolio.tracker import PortfolioTracker
 from src.risk.manager import RiskManager
 from src.trading.engine import TradeEngine, sync_live_bankroll
 from src.trading.settler import Settler
+from src.cycle_lock import cycle_lock
 
 logging.basicConfig(
     level=logging.INFO,
@@ -254,10 +255,21 @@ def execute_qualifying(
 
 
 def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
-    alerter = alerter or Alerter()
     settings = Settings()
     require_production_database(settings.DATABASE_URL)
     engine = get_engine(settings.DATABASE_URL)
+    # One cycle at a time, enforced by the database rather than by the
+    # scheduler. GitHub's concurrency group used to be the only thing between
+    # two overlapping cycles; with cycles now run inside the session job, a
+    # manual trade.yml dispatch during a session would otherwise double-run.
+    with cycle_lock(engine) as held:
+        if not held:
+            logger.warning("Another cycle holds the cycle lock — skipping this one")
+            return None
+        return _run_pipeline_locked(alerter or Alerter(), cycle, settings, engine)
+
+
+def _run_pipeline_locked(alerter: Alerter, cycle: int, settings: Settings, engine):
     clock = _Stopwatch()
     overruns: list = []
     # Refuses to trade against a schema it does not recognise rather than
