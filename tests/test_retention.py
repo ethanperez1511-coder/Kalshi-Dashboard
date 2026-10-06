@@ -190,3 +190,37 @@ class TestBudgetAndCap:
         assert "152% of 500 MB budget" in line
         assert "76% of 1000 MB Neon cap" in line
         assert line.startswith("⚠️")
+
+
+class TestLiveDataVersusFile:
+    """Neon counts the FILE, so the cap alarm reads the file. The budget is a
+    policy on how much data we keep, so it reads LIVE data. After the first
+    rolling prune, a 738 MB file held about a third of that live, and the
+    digest called it 'over budget' when the excess was dead pages."""
+
+    def test_dead_pages_do_not_read_as_a_budget_breach(self):
+        plan = RetentionPlan(size_bytes=738 * 1_000_000, live_bytes=300 * 1_000_000)
+        line = format_size_line(plan)
+        assert not plan.over_budget
+        assert line.startswith("💾")
+        assert "738 MB file" in line and "~300 MB live" in line
+        assert "438 MB reusable" in line
+
+    def test_live_data_over_budget_is_the_real_alarm(self):
+        plan = RetentionPlan(size_bytes=738 * 1_000_000, live_bytes=620 * 1_000_000)
+        assert plan.over_budget
+        assert format_size_line(plan).startswith("⚠️")
+
+    def test_the_cap_alarm_reads_the_file_whatever_is_live(self):
+        """Dead pages still count against Neon's cap."""
+        plan = RetentionPlan(size_bytes=900 * 1_000_000, live_bytes=100 * 1_000_000)
+        assert format_size_line(plan).startswith("🚨")
+
+    def test_without_a_live_measurement_the_file_is_judged(self):
+        plan = RetentionPlan(size_bytes=600 * 1_000_000)
+        assert plan.over_budget
+
+    def test_live_estimate_is_none_off_postgres(self, engine):
+        from src.maintenance.retention import live_bytes_estimate
+
+        assert live_bytes_estimate(engine) is None

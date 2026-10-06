@@ -82,16 +82,21 @@ PRUNED_TABLES = ("price_snapshots", "orderbook_delta_raw")
 @dataclass
 class RetentionPlan:
     size_bytes: int = 0
+    # Estimated live data. None = not measured, and then the file is judged.
+    live_bytes: Optional[int] = None
     deletions: Dict[str, int] = field(default_factory=dict)
     protected: List[str] = field(default_factory=list)
 
     @property
     def cap_fraction(self) -> float:
+        # Neon counts the file, dead pages included.
         return self.size_bytes / NEON_CAP_BYTES
 
     @property
     def over_budget(self) -> bool:
-        return self.size_bytes > STORAGE_BUDGET_BYTES
+        # The budget governs how much data we keep, so it reads live data.
+        judged = self.live_bytes if self.live_bytes is not None else self.size_bytes
+        return judged > STORAGE_BUDGET_BYTES
 
     @property
     def cap_alarm(self) -> bool:
@@ -117,6 +122,36 @@ def database_size_bytes(engine: Engine) -> int:
     return int(pages) * int(page_size)
 
 
+def live_bytes_estimate(engine: Engine) -> Optional[int]:
+    """Live data, estimated from planner statistics: live rows times average
+    row width per table, plus every TOAST and index file at full size.
+
+    Cheap enough for the digest: it reads catalog stats, not tables. The
+    statistics are refreshed by the VACUUM (ANALYZE) after every prune. It
+    errs high (index and TOAST bloat count as live), which is the safe
+    direction for a budget check.
+    """
+    if engine.dialect.name != "postgresql":
+        return None
+    with engine.connect() as conn:
+        value = conn.execute(text(
+            """
+            SELECT coalesce(sum(
+                       s.n_live_tup * (coalesce(w.width, 0) + 28)
+                       + pg_table_size(s.relid) - pg_relation_size(s.relid, 'main')
+                       + pg_indexes_size(s.relid)
+                   ), 0)
+            FROM pg_stat_user_tables s
+            LEFT JOIN (
+                SELECT tablename, sum(avg_width) AS width
+                FROM pg_stats WHERE schemaname = 'public' GROUP BY tablename
+            ) w ON w.tablename = s.relname
+            WHERE s.schemaname = 'public'
+            """
+        )).scalar()
+    return int(value or 0)
+
+
 def tape_cutoff(now: dt.datetime) -> dt.datetime:
     """Tape received before this is pruned. Rolls with the clock and never
     depends on what is in the table."""
@@ -126,7 +161,9 @@ def tape_cutoff(now: dt.datetime) -> dt.datetime:
 def plan_retention(engine: Engine, now: Optional[dt.datetime] = None) -> RetentionPlan:
     """What would be deleted. Counts only — no writes."""
     now = now or dt.datetime.now(dt.timezone.utc)
-    plan = RetentionPlan(size_bytes=database_size_bytes(engine))
+    plan = RetentionPlan(
+        size_bytes=database_size_bytes(engine), live_bytes=live_bytes_estimate(engine),
+    )
 
     from src.models.orderbook_raw import OrderbookDeltaRaw
     from src.models.price import PriceSnapshot
@@ -251,6 +288,7 @@ def apply_retention(engine: Engine, now: Optional[dt.datetime] = None) -> Retent
     plan.deletions["orderbook_tape_expired"] = prune_tape(engine, now)
 
     plan.size_bytes = database_size_bytes(engine)
+    plan.live_bytes = live_bytes_estimate(engine)
     logger.info(
         "Retention applied: %d rows removed, now %.0f MB (%.0f%% of cap)",
         plan.total_deletions, plan.size_bytes / MB, plan.cap_fraction * 100,
@@ -258,18 +296,28 @@ def apply_retention(engine: Engine, now: Optional[dt.datetime] = None) -> Retent
     return plan
 
 
-def size_status(size_bytes: int) -> str:
-    """Budget and cap in one phrase, so neither number appears alone."""
+def size_status(size_bytes: int, live_bytes: Optional[int] = None) -> str:
+    """Budget and cap in one phrase, so neither number appears alone. With a
+    live measurement, the file is read against the cap and the live data
+    against the budget, and the difference is named as reusable space."""
+    if live_bytes is None:
+        return (
+            f"{size_bytes / MB:.0f} MB — {size_bytes / STORAGE_BUDGET_BYTES:.0%} of "
+            f"{STORAGE_BUDGET_BYTES / MB:.0f} MB budget, "
+            f"{size_bytes / NEON_CAP_BYTES:.0%} of {NEON_CAP_BYTES / MB:.0f} MB Neon cap"
+        )
     return (
-        f"{size_bytes / MB:.0f} MB — {size_bytes / STORAGE_BUDGET_BYTES:.0%} of "
-        f"{STORAGE_BUDGET_BYTES / MB:.0f} MB budget, "
-        f"{size_bytes / NEON_CAP_BYTES:.0%} of {NEON_CAP_BYTES / MB:.0f} MB Neon cap"
+        f"{size_bytes / MB:.0f} MB file ({size_bytes / NEON_CAP_BYTES:.0%} of "
+        f"{NEON_CAP_BYTES / MB:.0f} MB Neon cap) · ~{live_bytes / MB:.0f} MB live "
+        f"({live_bytes / STORAGE_BUDGET_BYTES:.0%} of {STORAGE_BUDGET_BYTES / MB:.0f} MB "
+        f"budget) · {max(size_bytes - live_bytes, 0) / MB:.0f} MB reusable"
     )
 
 
 def format_plan(plan: RetentionPlan, applied: bool = False) -> str:
     lines = [
-        f"{'Applied' if applied else 'Planned'} retention — {size_status(plan.size_bytes)}"
+        f"{'Applied' if applied else 'Planned'} retention — "
+        f"{size_status(plan.size_bytes, plan.live_bytes)}"
     ]
     for name, count in sorted(plan.deletions.items()):
         if count:
@@ -283,9 +331,13 @@ def format_plan(plan: RetentionPlan, applied: bool = False) -> str:
         )
     elif plan.over_budget:
         lines.append(
-            "  ⚠️ over budget after pruning. If the live rows fit, the space is "
-            "dead pages: dispatch maintenance vacuum_full. If not, the write "
-            "rate is the problem"
+            "  ⚠️ live data over budget after pruning: the write rate or the "
+            "window is the problem, not dead pages"
+        )
+    elif plan.live_bytes is not None and plan.size_bytes > STORAGE_BUDGET_BYTES:
+        lines.append(
+            "  file over budget but live data under it: dead pages, reused by "
+            "new writes. To return them to Neon: maintenance shrink_tape"
         )
     return "\n".join(lines)
 
@@ -293,4 +345,4 @@ def format_plan(plan: RetentionPlan, applied: bool = False) -> str:
 def format_size_line(plan: RetentionPlan) -> str:
     """One line for the daily digest."""
     mark = "🚨" if plan.cap_alarm else ("⚠️" if plan.over_budget else "💾")
-    return f"{mark} DB: {size_status(plan.size_bytes)}"
+    return f"{mark} DB: {size_status(plan.size_bytes, plan.live_bytes)}"

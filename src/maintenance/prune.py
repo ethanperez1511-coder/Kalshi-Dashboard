@@ -22,6 +22,7 @@ from src.maintenance.retention import (
     apply_retention,
     database_size_bytes,
     format_plan,
+    live_bytes_estimate,
     plan_retention,
     size_status,
     vacuum_pruned_tables,
@@ -69,24 +70,29 @@ def main(argv=None) -> int:
         try:
             vacuumed = vacuum_pruned_tables(engine)
             plan.size_bytes = database_size_bytes(engine)
+            plan.live_bytes = live_bytes_estimate(engine)
             if vacuumed:
-                text += f"\n\nVACUUM (ANALYZE): {', '.join(vacuumed)} — now {size_status(plan.size_bytes)}"
+                text += (
+                    f"\n\nVACUUM (ANALYZE): {', '.join(vacuumed)} — now "
+                    f"{size_status(plan.size_bytes, plan.live_bytes)}"
+                )
         except Exception:
             logger.error("VACUUM failed — freed space will not be reused", exc_info=True)
             text += "\n\nVACUUM FAILED — see logs"
 
-    # Red means over OUR budget after pruning, which is well below the cap.
-    # The run goes red while half the cap is still free, not at the cap.
-    over = not args.dry_run and plan.size_bytes > STORAGE_BUDGET_BYTES
+    # Red means LIVE data over our budget after pruning (dead pages are
+    # reused, and are reported, not alarmed), or the file near Neon's cap,
+    # which counts dead pages too. Either way it goes red with headroom left.
+    over = not args.dry_run and (plan.over_budget or plan.cap_alarm)
     write_summary(
-        f"Retention: {size_status(plan.size_bytes)}, "
+        f"Retention: {size_status(plan.size_bytes, plan.live_bytes)}, "
         f"{plan.total_deletions:,} rows removed",
         text, ok=not over,
     )
     if over:
         logger.error(
-            "Over the %.0f MB budget after pruning and VACUUM: %s",
-            STORAGE_BUDGET_BYTES / MB, size_status(plan.size_bytes),
+            "Over the %.0f MB budget or near the cap after pruning and VACUUM: %s",
+            STORAGE_BUDGET_BYTES / MB, size_status(plan.size_bytes, plan.live_bytes),
         )
         return 1
     return 0
