@@ -148,7 +148,7 @@ class TestTapeRetention:
     def test_the_window_is_never_wider_than_the_cap_can_hold(self):
         """At the measured +49.5 MB/day, the window must fit inside the
         budget with room for everything else. 60 days was ~3 GB."""
-        assert DELTA_RETENTION_DAYS * 49.5 * 1024 * 1024 < NEON_CAP_BYTES
+        assert DELTA_RETENTION_DAYS * 49.5 * 1_000_000 < NEON_CAP_BYTES
 
 
 class TestBudgetAndCap:
@@ -159,19 +159,20 @@ class TestBudgetAndCap:
         free when the budget is first breached."""
         assert STORAGE_BUDGET_BYTES <= 0.6 * NEON_CAP_BYTES
 
-    def test_the_cap_is_the_current_neon_free_limit(self):
-        assert NEON_CAP_BYTES == 1024 ** 3
+    def test_the_cap_is_the_current_neon_free_limit_read_conservatively(self):
+        """1 GB as the console counts it (decimal), not 1 GiB."""
+        assert NEON_CAP_BYTES == 1_000_000_000
 
     def test_size_is_measured_not_estimated(self, engine):
         _snap(engine, "M", NOW)
         assert database_size_bytes(engine) > 0
 
     def test_under_budget_is_calm(self):
-        line = format_size_line(RetentionPlan(size_bytes=400 * 1024 * 1024))
+        line = format_size_line(RetentionPlan(size_bytes=400 * 1_000_000))
         assert line.startswith("💾")
 
     def test_over_budget_warns_long_before_the_cap(self):
-        plan = RetentionPlan(size_bytes=600 * 1024 * 1024)
+        plan = RetentionPlan(size_bytes=600 * 1_000_000)
         assert plan.over_budget and not plan.cap_alarm
         assert format_size_line(plan).startswith("⚠️")
 
@@ -180,10 +181,12 @@ class TestBudgetAndCap:
         assert format_size_line(plan).startswith("🚨")
         assert "refuses writes AND deletes" in format_plan(plan, applied=True)
 
-    def test_todays_size_reads_against_both_numbers(self):
-        """721 MB was reported as '134% of free tier' against a stale 512 MiB
-        constant. It is over budget and 70% of the real cap."""
-        line = format_size_line(RetentionPlan(size_bytes=721 * 1024 * 1024))
-        assert "144% of 500 MB budget" in line
-        assert "70% of 1024 MB Neon cap" in line
+    def test_todays_size_reads_as_the_console_does(self):
+        """The console said 762 MB on 2026-10-06, while the heartbeat said
+        '721 MB (134% of free tier)': MiB against a stale 512 MiB constant.
+        The same bytes must now print the console's number."""
+        line = format_size_line(RetentionPlan(size_bytes=761_960_000))
+        assert line.startswith("⚠️ DB: 762 MB")
+        assert "152% of 500 MB budget" in line
+        assert "76% of 1000 MB Neon cap" in line
         assert line.startswith("⚠️")

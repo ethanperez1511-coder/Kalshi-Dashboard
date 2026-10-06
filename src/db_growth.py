@@ -27,7 +27,7 @@ from src.database import get_session
 # One source of truth for the cap and the budget. This file had its own copy of
 # the old 512 MiB tier, which kept the digest at "134% of tier" after Neon
 # doubled the cap.
-from src.maintenance.retention import NEON_CAP_BYTES, size_status
+from src.maintenance.retention import MB, NEON_CAP_BYTES, size_status
 from src.models.db_size import DbSizeSample
 
 logger = logging.getLogger(__name__)
@@ -106,7 +106,7 @@ def growth(engine: Engine, now: Optional[dt.datetime] = None) -> dict:
     return {
         "samples": len(rows),
         "current_bytes": last_size,
-        "mb_per_day": bytes_per_day / 1_048_576,
+        "mb_per_day": bytes_per_day / MB,
         "days_to_full": days_to_full,
         "span_days": span_days,
     }

@@ -45,12 +45,16 @@ from src.database import get_session
 
 logger = logging.getLogger(__name__)
 
-MB = 1024 * 1024
+# Decimal, as the Neon console reports. The heartbeat and the console must
+# show the same number (762 MB in the console was 721 "MB" in MiB here).
+MB = 1_000_000
 
 # Neon Free plan cap, raised from 0.5 GB to 1 GB on 2026-10-02 (changelog).
-NEON_CAP_BYTES = 1024 * 1024 * 1024
+# Taken as DECIMAL GB, the smaller reading: the console counts in decimal
+# units, and if the cap is in fact 1 GiB this only errs early.
+NEON_CAP_BYTES = 1000 * MB
 # Our own ceiling. Red above this, after pruning.
-STORAGE_BUDGET_BYTES = 500 * 1024 * 1024
+STORAGE_BUDGET_BYTES = 500 * MB
 # Fraction of the CAP at which the digest escalates to 🚨. Past here the next
 # few days of growth can deadlock cleanup.
 CAP_ALARM_FRACTION = 0.85

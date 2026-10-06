@@ -221,7 +221,7 @@ def _vacuum_full(engine, token: str) -> int:
         return 1
 
     headline = (
-        f"VACUUM FULL EXECUTED: {sum(executed.values()) / 1024 / 1024:.0f} MB reclaimed"
+        f"VACUUM FULL EXECUTED: {sum(executed.values()) / 1_000_000:.0f} MB reclaimed"
         if executed is not None else
         f"VACUUM FULL DRY RUN: {len(plan.tables)} tables, "
         f"{len(plan.refused)} refused by the space guard"

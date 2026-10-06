@@ -17,6 +17,7 @@ from src.maintenance.tape import (
     plan_compaction,
 )
 from src.maintenance.retention import (
+    MB,
     STORAGE_BUDGET_BYTES,
     apply_retention,
     database_size_bytes,
@@ -85,7 +86,7 @@ def main(argv=None) -> int:
     if over:
         logger.error(
             "Over the %.0f MB budget after pruning and VACUUM: %s",
-            STORAGE_BUDGET_BYTES / 1024 / 1024, size_status(plan.size_bytes),
+            STORAGE_BUDGET_BYTES / MB, size_status(plan.size_bytes),
         )
         return 1
     return 0

@@ -24,7 +24,7 @@ from src.maintenance.vacuum_full import (
 )
 from tests.test_maintenance_entrypoint import run_module, seeded  # noqa: F401
 
-MB = 1024 * 1024
+MB = 1_000_000
 
 
 class TestTokenGate:

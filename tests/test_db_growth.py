@@ -17,7 +17,7 @@ from src.maintenance.retention import NEON_CAP_BYTES
 from src.models.db_size import DbSizeSample
 
 NOW = dt.datetime(2026, 8, 17, 12, 0, tzinfo=dt.timezone.utc)
-MB = 1_048_576
+MB = 1_000_000  # decimal, as the Neon console and the digest report
 
 
 @pytest.fixture
