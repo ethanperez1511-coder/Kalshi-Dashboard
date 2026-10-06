@@ -1920,3 +1920,19 @@ No new model types; economics stays closed; low-temp series not started.
 ## Recommended order
 P0 (deadline ~Oct 11) → P1 (compute deadline; P1.0 first) → P2 → P3 → P4 →
 P6; P5 at the live-flip ruling. Gate 32/50 means P3+P4+P5 must land before 50.
+
+## Rulings 2026-10-06 (second pass), after the Neon console actuals
+Console since Sep 30: compute 7.69 CU-h, storage 761.96 MB, history 13.65 MB,
+transfer 44.86 MB, autoscale 0.25<->2 CU.
+- [x] Compute line recalibrated to CU-hours (`f3a0276`); the old figure was
+      ~6x high. October paces to ~35 CU-h of 100. P1 is DEMOTED to an
+      improvement; storage is the only clock.
+- [x] Storage reported in decimal MB, as the console does; cap = 10^9 bytes
+      (`ce577cb`).
+- P1 approved as recommended. Open for confirmation: self-chaining via
+  workflow_dispatch, zero off-session cycles, heartbeat once per UTC date.
+- Shadow: the 28 rows are to be WIPED (not voided). Rebuild with a failing
+  test per defect, shown red before green. Fee read from the API, plus an
+  alert on change.
+- Liquidity rewards: CLOSED. Reopening condition: a new KXHIGH* program in
+  GET /incentive_programs, rechecked weekly in the digest.
