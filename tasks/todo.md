@@ -1964,3 +1964,47 @@ transfer 44.86 MB, autoscale 0.25<->2 CU.
       `mode` is untouched (DB-only, default paper). DB corruption: the new lock
       makes concurrent cycles impossible, where before only a GitHub
       concurrency group stood between them.
+- [x] P1 BUILT (7d22788, b0c2087, 58f646f): session job, successor chaining,
+      watchdog + daily re-enable, zero off-session cycles, heartbeat per UTC
+      date, advisory cycle lock. 1187 tests; wiring smoke-tested with echo
+      subprocesses. FINDING: the 6 h window cannot fit one hosted job
+      (5h40m usable), so every day is two links: 15:00–20:40, then 20:40–21:00.
+
+## D. SHADOW REBUILD — PLAN (rulings 2026-10-06; written before building)
+Each defect gets a test shown FAILING on the current code before the fix.
+1. Tape after placement. Placement writes `pending` with the plan's prices.
+   A resolver at the start of each cycle resolves rows whose window has
+   closed: simulate if COVERED, otherwise keep pending; `unproven` only
+   after 2 h (recorder rows land in batches).
+   COVERED = this market was snapshotted at T0 ≤ window start; there was NO
+   re-snapshot (a reconnect or a new segment) between T0 and the window end;
+   the same connection delivered a row after the window end (any market,
+   before this market's next snapshot); and no gap per item 4.
+2. Bid+1. Start at our side's best bid + 1¢ (yes_bid, or 100 − yes_ask for
+   no). Never at or above the taker price: the ladder is capped at taker − 1¢
+   as well as by the model cap, and a 1¢ spread joins the bid. Prices come
+   from the opp's quote at decision time.
+3. Category and series. The scorer puts the market's category in the opp;
+   reports go per SERIES (series_of(market_id)), never pooled.
+4. Gap spanning = unproven. Today's gap check only sees gaps tagged with the
+   order's own ticker, inside the window. But seq is per SUBSCRIPTION, shared
+   by every market in it, and a gap is detected at the NEXT message, which
+   can come after the window. New rule: any gap on the connection, detected
+   between window start and the first row after window end, makes the order
+   unproven.
+5. Wipe: maintenance `wipe_void_shadow` + token, dry run first, deletes only
+   rows created before the rebuild deploy.
+6. Fees (the fee watchdog, early): a FeeSchedule per series from
+   GET /series/{s} (`fee_type`, `fee_multiplier`), cached per cycle, last seen
+   persisted. Taker = 0.07 × multiplier; maker = 0.0175 × multiplier ONLY for
+   `quadratic_with_maker_fees`, else 0. Unknown fee_type → refuse that series
+   + alert. Change vs last seen → alert. Replaces the hardcoded 0.07 in
+   ev/calculator.py and trading/fees.py. The shadow's maker_fee is now the
+   maker rate: it currently charges the TAKER fee to the maker side, which
+   understates capture on every row.
+   OPEN, needs a ruling (money path): if the fetch FAILS, use a last-seen
+   schedule up to 24 h old, else refuse the series.
+- Safety: no limit, Kelly, mode or gate code touched. Today's fee numbers are
+  unchanged (quadratic × 1 = 0.07), and a test pins that equality, so the EV
+  path cannot drift. The shadow path still writes only shadow_maker_orders
+  (existing test W3 kept).
