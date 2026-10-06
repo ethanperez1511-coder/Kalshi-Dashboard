@@ -202,6 +202,18 @@ class BookReplay:
 
     def _body(self, row) -> dict:
         raw = getattr(row, "payload", "") or ""
+        if not raw and (getattr(row, "msg_type", "") or "").lower() == "delta":
+            # A compacted delta (payload nulled after the 2-day window). Its
+            # columns are the whole message, so the book is rebuilt from them.
+            # Only deltas: a snapshot or trade without its payload is still
+            # refused below, because no column carries a full book or a print.
+            columns = {
+                "side": getattr(row, "side", None),
+                "price_dollars": getattr(row, "price_dollars", None),
+                "delta_fp": getattr(row, "delta_fp", None),
+            }
+            if all(v is not None for v in columns.values()):
+                return columns
         try:
             message = json.loads(raw)
         except (TypeError, ValueError):
@@ -366,7 +378,8 @@ def load_rows(engine, market_ticker: str, start_ms: Optional[int] = None,
         return [
             _Row(
                 msg_type=r.msg_type, sid=r.sid, seq=r.seq, ts_ms=r.ts_ms,
-                payload=r.payload,
+                payload=r.payload, side=r.side, price_dollars=r.price_dollars,
+                delta_fp=r.delta_fp,
             )
             for r in rows
         ]
@@ -378,4 +391,7 @@ class _Row:
     sid: Optional[int]
     seq: Optional[int]
     ts_ms: Optional[int]
-    payload: str
+    payload: Optional[str]
+    side: Optional[str] = None
+    price_dollars: Optional[float] = None
+    delta_fp: Optional[float] = None

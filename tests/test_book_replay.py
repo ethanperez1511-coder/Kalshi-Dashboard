@@ -230,3 +230,38 @@ def test_rows_load_in_insertion_order_not_sequence_order(db_engine):
         s.commit()
 
     assert [r.seq for r in load_rows(db_engine, "M")] == [1, 2, 5]
+
+
+class TestCompactedDeltas:
+    """Ruling 2026-10-06 (a) nulls delta payloads after 2 days. A delta's
+    columns (side, price_dollars, delta_fp) are its whole message, so replay
+    must rebuild the same book from them, and must still refuse anything the
+    columns cannot carry."""
+
+    class _Compacted:
+        def __init__(self, seq, side="yes", price_dollars=0.40, delta_fp=-25.0, sid=1):
+            self.msg_type, self.seq, self.sid, self.ts_ms = "delta", seq, sid, 1_001
+            self.payload = None
+            self.side, self.price_dollars, self.delta_fp = side, price_dollars, delta_fp
+
+    def test_a_compacted_delta_rebuilds_the_same_book(self):
+        full, compacted = BookReplay("M"), BookReplay("M")
+        full.apply(_snapshot())
+        compacted.apply(_snapshot())
+
+        a = full.apply(_delta(2, side="yes", price=40, change=-25))
+        b = compacted.apply(self._Compacted(2, side="yes", price_dollars=0.40, delta_fp=-25.0))
+
+        assert a.levels == b.levels
+
+    def test_a_compacted_delta_missing_a_column_is_refused(self):
+        engine = BookReplay("M")
+        engine.apply(_snapshot())
+        with pytest.raises(ReplayRefused):
+            engine.apply(self._Compacted(2, delta_fp=None))
+
+    def test_a_snapshot_without_its_payload_is_still_refused(self):
+        row = self._Compacted(1)
+        row.msg_type = "snapshot"
+        with pytest.raises(ReplayRefused):
+            BookReplay("M").apply(row)
