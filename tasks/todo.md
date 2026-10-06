@@ -2008,3 +2008,28 @@ Each defect gets a test shown FAILING on the current code before the fix.
   unchanged (quadratic × 1 = 0.07), and a test pins that equality, so the EV
   path cannot drift. The shadow path still writes only shadow_maker_orders
   (existing test W3 kept).
+
+## 2026-10-06 (third pass) — evidence
+- Q1: Neon lists "Instant restore history | 6 hours, capped at 1 GB of change
+  history" as its own line item beside "Postgres storage | 1 GB per project",
+  and says the limit "applies to Postgres storage". Separate, though not
+  stated as excluded in so many words.
+- Q2 calibration (Postgres 16 WAL, forced checkpoint = worst case): DELETE
+  630 B/row vs Neon's observed ~55 B/row (~0.087x); shrink 1,642 B per moved
+  row -> ~143 B expected in Neon. Full shrink ~455k moved rows -> ~65 MB of
+  history expected, ≤ 750 MB worst case.
+- [x] Q3 max_chunks + own before/after sizes (ecd5a02).
+- [x] A: 2-day delta compaction, 20k batches, 90% stop (3f11dd2); replay
+      reads columns (73c9f95). Red first; mutation-proven invariants.
+- [x] C: cap defense (d64cbfa). Refinement: cuts only while LIVE ≥ 75%.
+- [x] D fees (dca8942) + shadow rebuild (49f8cc0). 1240 tests.
+- [ ] INCIDENT: no session run fired on day 1 (L32). Dispatch by hand; decide
+      on a backstop and an external trigger.
+- [ ] OPERATOR: 2-chunk shrink test; wipe_void_shadow dry run, then token.
+- [ ] E: after 3 full session days, rerun the steady-state table.
+- FINDING (not fixed): replay checks seq per MARKET, but seq is per
+  SUBSCRIPTION, so on real multi-market tape it refuses almost at once. It has
+  no production caller; fix before anything depends on replay.
+- FINDING (inert today): opp["net_ev"] is the YES side's EV on every call;
+  execute_qualifying builds no_ev = -net_ev. Risk/Kelly do not read it, so
+  sizing is unaffected; the fee check now uses traded_net_ev.

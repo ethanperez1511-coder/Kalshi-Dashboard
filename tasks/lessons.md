@@ -625,3 +625,23 @@ in this fetch" and "the filter is disabled" rendered identically — for a day.
 Ingest now logs the active list every cycle and logs at ERROR when it is empty.
 This is the same shape as the shadow section that was invisible until a trade
 placed: silence has to mean exactly one thing.
+
+## L32 — Never remove a working scheduler before its replacement has demonstrably run.
+
+On 2026-10-06 the session job replaced the trade cycle's */15 cron in a single
+push. The old schedule was degraded (~6 runs a day) but it was RUNNING. The
+new crons, and the watchdog meant to notice a dead session, were both brand-new
+schedules on GitHub's degraded scheduler, and none of them fired that
+afternoon. Result: zero trade cycles from ~14:10 UTC, and the watchdog built
+to catch exactly that was silent for the same reason.
+
+Two rules:
+
+**Cut over by overlap, not by swap.** Keep the old trigger until the new one
+has a green run in production; the cycle lock makes overlap safe. Remove the
+old one in a separate change, after the evidence.
+
+**A watchdog must not share the failure mode it watches.** A cron that checks
+whether a cron fired fails silently whenever crons do. The dead-session alert
+needs a trigger outside GitHub's scheduler (an external caller of
+workflow_dispatch), or it is decoration.
