@@ -2050,3 +2050,20 @@ Each defect gets a test shown FAILING on the current code before the fix.
 - [ ] Evaluate before ANY external trigger token: GitHub Environment
       `destructive` with a required reviewer on maintenance's confirm path.
 - [ ] E: steady-state table after 3 full session days.
+
+## 2026-10-07
+- [x] A: lead gate counted UTC days; settlement is local. The 23:58 UTC
+      manual cycle scored after 00:00 UTC and refused all 76 thresholds
+      (Oct 6 + Oct 7 ladders). Fixed: station-local date. Not a regression.
+      Ladders open 14:00 UTC on D-1 and close 05:00 UTC on D+1, so a lead-1
+      ladder exists from 14:00 UTC to local midnight; the 15-21 session sits
+      inside it.
+- [ ] B RULING NEEDED: the capped /markets walk is 3000/3000 excluded parlays
+      (KXMVECROSSCATEGORY-R), so SportsOdds is reached by nothing. With
+      mve_filter=exclude the same 3000 slots are single markets (54
+      sports-looking series). Odds quota (500/month) vs ~30 cycles/day must
+      be budgeted before turning it on.
+- [x] C: maintenance pending_matches (read-only).
+- [x] Session kick from the backstop (session triggers fired 0/10 on days 1-2).
+- [ ] Environments after the shrink test. Dead-man: OPERATOR creates the
+      healthchecks.io check and the DEADMAN_PING_URL secret.
