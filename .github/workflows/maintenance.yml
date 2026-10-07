@@ -27,6 +27,11 @@ on:
         type: boolean
         required: false
         default: false
+      pending_matches:
+        description: "Read-only: list Polymarket pairs awaiting review (verdicts go in match_seed.py). Ignores the other inputs."
+        type: boolean
+        required: false
+        default: false
       day7:
         description: "Read-only: day-7 trade-through measurement per category (live rows only). Ignores the other inputs."
         type: boolean
@@ -87,6 +92,7 @@ jobs:
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY_B64 }}
           DB_STATS: ${{ inputs.db_stats }}
           DAY7: ${{ inputs.day7 }}
+          PENDING_MATCHES: ${{ inputs.pending_matches }}
           PURGE_MARKETS: ${{ inputs.purge_markets }}
           VACUUM_FULL: ${{ inputs.vacuum_full }}
           SHRINK_TAPE: ${{ inputs.shrink_tape }}
@@ -102,6 +108,8 @@ jobs:
             python -m src.maintenance --db-stats
           elif [ "$DAY7" = "true" ]; then
             python -m src.execution.day7
+          elif [ "$PENDING_MATCHES" = "true" ]; then
+            python -m src.maintenance --pending-matches
           elif [ "$PURGE_MARKETS" = "true" ]; then
             python -m src.maintenance --purge-markets --confirm "$CONFIRM"
           elif [ "$VACUUM_FULL" = "true" ]; then

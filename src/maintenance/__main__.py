@@ -106,6 +106,10 @@ def main(argv=None) -> int:
         ),
     )
     parser.add_argument(
+        "--pending-matches", action="store_true",
+        help="Read-only: list Polymarket pairs awaiting review, for match_seed.py.",
+    )
+    parser.add_argument(
         "--wipe-void-shadow", action="store_true",
         help="Delete shadow rows written before the 2026-10-06 rebuild (void). "
              "Dry run unless --confirm WIPE-VOID-SHADOW",
@@ -133,6 +137,9 @@ def main(argv=None) -> int:
 
     if args.vacuum_full:
         return _vacuum_full(engine, args.confirm.strip())
+
+    if args.pending_matches:
+        return _pending_matches(engine)
 
     if args.wipe_void_shadow:
         return _wipe_void_shadow(engine, args.confirm.strip())
@@ -259,6 +266,37 @@ def _vacuum_full(engine, token: str) -> int:
         f"{len(plan.refused)} refused by the space guard"
     )
     write_summary(headline, text[:4000], ok=True)
+    return 0
+
+
+def _pending_matches(engine) -> int:
+    """The review queue, with what a verdict needs: both titles, the similarity,
+    the condition id, and the Kalshi rules (compare RESOLUTION, not names; L8).
+    SELECT-only, so no token."""
+    from src.database import get_session
+    from src.modeling.match_store import list_matches
+    from src.models.market import Market
+
+    pending = list_matches(engine, "pending")
+    lines = [f"POLYMARKET REVIEW QUEUE — {len(pending)} pending", ""]
+    with get_session(engine) as session:
+        for m in sorted(pending, key=lambda r: -(r["similarity"] or 0)):
+            market = session.query(Market).filter(
+                Market.market_id == m["kalshi_market_id"]
+            ).one_or_none()
+            rules = (getattr(market, "rules", "") or "")[:400] if market else ""
+            close = getattr(market, "close_date", None) if market else None
+            lines += [
+                f"[{m['similarity'] or 0:.2f}] {m['kalshi_market_id']}  (closes {close or '?'})",
+                f"    Kalshi : {m['kalshi_title']}",
+                f"    Poly   : {m['poly_question']}",
+                f"    cond   : {m['poly_condition_id']}",
+                f"    rules  : {rules}" if rules else "    rules  : (not stored)",
+                "",
+            ]
+    text = "\n".join(lines)
+    print(text)
+    write_summary(f"Polymarket review queue: {len(pending)} pending", text[:60000], ok=True)
     return 0
 
 
