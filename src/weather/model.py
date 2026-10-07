@@ -25,6 +25,7 @@ reason an ensemble challenger is queued behind its probe.
 from __future__ import annotations
 
 import datetime as dt
+from zoneinfo import ZoneInfo
 import logging
 import re
 
@@ -199,7 +200,10 @@ class WeatherModel(BaseModel):
             self.refusals["terms_incomplete"] += 1
             return None
 
-        today = self._now().date()
+        # The station's calendar, not UTC's: settlement is the LOCAL day. On
+        # UTC dates, from 00:00 UTC to local midnight (4 h in New York, 7 h in
+        # Phoenix) the next local day's ladder read as lead 0 and was refused.
+        today = self._now().astimezone(ZoneInfo(station.timezone)).date()
         intended_lead = (target - today).days
         if intended_lead < 1 or intended_lead > MAX_PRICEABLE_LEAD:
             self.refusals[
