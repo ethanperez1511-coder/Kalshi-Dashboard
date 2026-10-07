@@ -15,6 +15,10 @@ on:
 
 # One cycle at a time. Never cancel a running cycle mid-trade (would risk a partial
 # write / double-execution against the single-writer Postgres DB). Extra ticks queue.
+permissions:
+  contents: read
+  actions: write      # session kick: dispatch market-session if none is running
+
 concurrency:
   group: paper-trade-cycle
   cancel-in-progress: false
@@ -34,6 +38,14 @@ jobs:
       # the pipeline nor the dashboard migrates on startup — they report a stale
       # schema and refuse. Additive-only and idempotent, so a no-op run costs
       # one query.
+      # The session's own cron triggers did not fire on its first two days;
+      # this backstop did. Inside 13:00-20:40 UTC with no session link running
+      # or queued, start one. Never fails the cycle (always exits 0).
+      - name: Start today's session if nothing else has
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SESSION_WORKFLOW: session.yml
+        run: python -m src.session_kick
       - name: Apply pending schema migrations
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
