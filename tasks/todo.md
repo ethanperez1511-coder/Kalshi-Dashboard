@@ -2067,3 +2067,8 @@ Each defect gets a test shown FAILING on the current code before the fix.
 - [x] Session kick from the backstop (session triggers fired 0/10 on days 1-2).
 - [ ] Environments after the shrink test. Dead-man: OPERATOR creates the
       healthchecks.io check and the DEADMAN_PING_URL secret.
+
+## Oracle migration — SPEC FOR APPROVAL: docs/oracle-migration-spec.md
+- [ ] Operator: create the VM per §2 (or §3 fallback); report shape/AD obtained.
+- [ ] Rulings §7: shape + 24/7 cadence on VM; recorder window; PAYG (not now).
+- [ ] Phases B–D only after approval. Cutover by overlap (L32), single writer.
