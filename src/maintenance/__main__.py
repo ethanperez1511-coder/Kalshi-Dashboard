@@ -106,6 +106,10 @@ def main(argv=None) -> int:
         ),
     )
     parser.add_argument(
+        "--clear-halt", action="store_true",
+        help="List latched kill-switch halts; clear them with --confirm CLEAR-HALT.",
+    )
+    parser.add_argument(
         "--pending-matches", action="store_true",
         help="Read-only: list Polymarket pairs awaiting review, for match_seed.py.",
     )
@@ -137,6 +141,9 @@ def main(argv=None) -> int:
 
     if args.vacuum_full:
         return _vacuum_full(engine, args.confirm.strip())
+
+    if args.clear_halt:
+        return _clear_halt(engine, args.confirm.strip())
 
     if args.pending_matches:
         return _pending_matches(engine)
@@ -266,6 +273,34 @@ def _vacuum_full(engine, token: str) -> int:
         f"{len(plan.refused)} refused by the space guard"
     )
     write_summary(headline, text[:4000], ok=True)
+    return 0
+
+
+CLEAR_HALT_TOKEN = "CLEAR-HALT"
+
+
+def _clear_halt(engine, token: str) -> int:
+    """The only way a latched halt is released: a human types the token."""
+    from src.risk.halts import active_halts, clear_halts
+
+    if token and token != CLEAR_HALT_TOKEN:
+        logger.error("Confirmation token did not match. Expected %r, got %r. "
+                     "Nothing was changed.", CLEAR_HALT_TOKEN, token)
+        write_summary("Clear halt: BAD CONFIRM TOKEN — nothing changed", ok=False)
+        return 2
+
+    rows = active_halts(engine)
+    lines = [f"ACTIVE HALTS: {len(rows)}"] + [
+        f"  {h.switch:18s} since {h.tripped_at}  {h.detail}" for h in rows
+    ]
+    if token == CLEAR_HALT_TOKEN:
+        cleared = clear_halts(engine, by="operator:clear-halt")
+        lines.append(f"CLEARED {cleared} halt(s). Trading resumes on the next cycle.")
+    else:
+        lines.append("Dry run. To clear: --clear-halt --confirm CLEAR-HALT")
+    text = "\n".join(lines)
+    print(text)
+    write_summary(lines[-1], text, ok=True)
     return 0
 
 

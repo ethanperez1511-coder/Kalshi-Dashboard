@@ -95,7 +95,7 @@ class TestWiring:
         monkeypatch.setattr(rt, "get_engine", lambda url: engine)
         monkeypatch.setattr(rt, "_run_pipeline_locked", body)
         monkeypatch.setattr(rt, "ping_deadman", lambda url: pings.append(url) or True)
-        monkeypatch.setattr(rt, "record_cycle", lambda e, s, f, ok, src: records.append(ok))
+        monkeypatch.setattr(rt, "record_cycle", lambda e, s, f, ok, src, **kw: records.append(ok))
         monkeypatch.setenv("DEADMAN_PING_URL", "https://hc-ping.com/uuid")
         return pings, records
 

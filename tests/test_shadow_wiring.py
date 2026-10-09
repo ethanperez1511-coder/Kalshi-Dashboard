@@ -79,6 +79,9 @@ class _Alerter:
     def trade(self, *args, **kwargs):
         return True
 
+    def send(self, text):
+        return True
+
 
 def _run_execution(engine, monkeypatch, shadow_enabled, qualifying=None):
     """Drive the real execution loop, not a re-implementation of it."""

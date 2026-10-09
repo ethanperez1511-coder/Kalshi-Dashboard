@@ -14,6 +14,7 @@ name: maintenance
 #   purge_markets    + PURGE-ORPHAN-MARKETS   -> delete dependency-free rows
 #   vacuum_full      + VACUUM-FULL-TAPE       -> rewrite pruned tables, return space
 #   shrink_tape      + SHRINK-TAPE            -> measure tape; shrink it in place
+#   clear-halt       + CLEAR-HALT             -> release latched kill-switch halts
 #   wipe_void_shadow + WIPE-VOID-SHADOW       -> delete pre-rebuild shadow rows
 # One token for both would mean confirming either confirms both.
 #
@@ -22,51 +23,35 @@ name: maintenance
 on:
   workflow_dispatch:
     inputs:
-      db_stats:
-        description: "Read-only DB census — table sizes, market statuses, growth rates. Ignores the other two inputs."
-        type: boolean
-        required: false
-        default: false
-      pending_matches:
-        description: "Read-only: list Polymarket pairs awaiting review (verdicts go in match_seed.py). Ignores the other inputs."
-        type: boolean
-        required: false
-        default: false
-      day7:
-        description: "Read-only: day-7 trade-through measurement per category (live rows only). Ignores the other inputs."
-        type: boolean
-        required: false
-        default: false
-      purge_markets:
-        description: "Purge market rows with zero dependent data, archive the rest. Dry run unless confirm=PURGE-ORPHAN-MARKETS."
-        type: boolean
-        required: false
-        default: false
-      vacuum_full:
-        description: "Rewrite the pruned tables to return freed space to Neon (exclusive lock). Dry run unless confirm=VACUUM-FULL-TAPE."
-        type: boolean
-        required: false
-        default: false
-      shrink_tape:
-        description: "Measure the tape table (sizes, rate, steady state). With confirm=SHRINK-TAPE, shrink it in place in chunks."
-        type: boolean
-        required: false
-        default: false
-      wipe_void_shadow:
-        description: "Delete the shadow rows written before the 2026-10-06 rebuild (void). Dry run unless confirm=WIPE-VOID-SHADOW."
-        type: boolean
-        required: false
-        default: false
-      max_chunks:
-        description: "With shrink_tape: stop after N chunks of 20,000 rows (an installment, no reindex). Blank = run to completion."
+      # One action per dispatch. A choice list rather than a checkbox per
+      # action: the checkboxes had reached GitHub's input limit, and a choice
+      # cannot select two destructive actions at once.
+      action:
+        description: "What to run. Read-only actions ignore confirm; the others dry-run unless confirm carries their exact token."
+        type: choice
+        required: true
+        default: db-stats
+        options:
+          - db-stats            # read-only census
+          - pending-matches     # read-only: Polymarket review queue
+          - day7                # read-only: trade-through measurement
+          - clear-halt          # lists latched halts; CLEAR-HALT clears them
+          - wipe-void-shadow    # WIPE-VOID-SHADOW
+          - shrink-tape         # measurement; SHRINK-TAPE shrinks (see max_chunks)
+          - vacuum-full         # VACUUM-FULL-TAPE
+          - purge-markets       # PURGE-ORPHAN-MARKETS
+          - retire-deploy       # needs retire_sha; RETIRE-DEPLOY-SHA
+          - legacy-positions    # CLOSE-LEGACY-POSITIONS
+      confirm:
+        description: "The action's exact token (CLEAR-HALT, WIPE-VOID-SHADOW, SHRINK-TAPE, VACUUM-FULL-TAPE, PURGE-ORPHAN-MARKETS, RETIRE-DEPLOY-SHA, CLOSE-LEGACY-POSITIONS). Blank = dry run."
         required: false
         default: ""
       retire_sha:
-        description: "Deploy SHA to retire from the gate (e.g. e807f8dd). Blank = legacy-position reconcile instead."
+        description: "retire-deploy only: the deploy SHA to retire (e.g. e807f8dd)."
         required: false
         default: ""
-      confirm:
-        description: "CLOSE-LEGACY-POSITIONS to unwind, RETIRE-DEPLOY-SHA to retire a deploy, PURGE-ORPHAN-MARKETS to purge, VACUUM-FULL-TAPE to vacuum, SHRINK-TAPE to shrink, WIPE-VOID-SHADOW to wipe. Blank for a dry run."
+      max_chunks:
+        description: "shrink-tape only: stop after N chunks of 20,000 rows (an installment, no reindex). Blank = to completion."
         required: false
         default: ""
 
@@ -90,40 +75,29 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           KALSHI_API_KEY: ${{ secrets.KALSHI_API_KEY }}
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY_B64 }}
-          DB_STATS: ${{ inputs.db_stats }}
-          DAY7: ${{ inputs.day7 }}
-          PENDING_MATCHES: ${{ inputs.pending_matches }}
-          PURGE_MARKETS: ${{ inputs.purge_markets }}
-          VACUUM_FULL: ${{ inputs.vacuum_full }}
-          SHRINK_TAPE: ${{ inputs.shrink_tape }}
-          MAX_CHUNKS: ${{ inputs.max_chunks }}
-          WIPE_VOID_SHADOW: ${{ inputs.wipe_void_shadow }}
+          ACTION: ${{ inputs.action }}
           RETIRE_SHA: ${{ inputs.retire_sha }}
           CONFIRM: ${{ inputs.confirm }}
+          MAX_CHUNKS: ${{ inputs.max_chunks }}
         # Inputs go through the environment, never interpolated into the shell
         # command: a workflow_dispatch input is attacker-controlled text and
         # "${{ inputs.x }}" inside `run:` is a shell injection.
         run: |
-          if [ "$DB_STATS" = "true" ]; then
-            python -m src.maintenance --db-stats
-          elif [ "$DAY7" = "true" ]; then
-            python -m src.execution.day7
-          elif [ "$PENDING_MATCHES" = "true" ]; then
-            python -m src.maintenance --pending-matches
-          elif [ "$PURGE_MARKETS" = "true" ]; then
-            python -m src.maintenance --purge-markets --confirm "$CONFIRM"
-          elif [ "$VACUUM_FULL" = "true" ]; then
-            python -m src.maintenance --vacuum-full --confirm "$CONFIRM"
-          elif [ "$WIPE_VOID_SHADOW" = "true" ]; then
-            python -m src.maintenance --wipe-void-shadow --confirm "$CONFIRM"
-          elif [ "$SHRINK_TAPE" = "true" ]; then
-            if [ -n "$MAX_CHUNKS" ]; then
-              python -m src.maintenance --shrink-tape --confirm "$CONFIRM" --max-chunks "$MAX_CHUNKS"
-            else
-              python -m src.maintenance --shrink-tape --confirm "$CONFIRM"
-            fi
-          elif [ -n "$RETIRE_SHA" ]; then
-            python -m src.maintenance --retire-sha "$RETIRE_SHA" --confirm "$CONFIRM"
-          else
-            python -m src.maintenance --confirm "$CONFIRM"
-          fi
+          case "$ACTION" in
+            db-stats)          python -m src.maintenance --db-stats ;;
+            pending-matches)   python -m src.maintenance --pending-matches ;;
+            day7)              python -m src.execution.day7 ;;
+            clear-halt)        python -m src.maintenance --clear-halt --confirm "$CONFIRM" ;;
+            wipe-void-shadow)  python -m src.maintenance --wipe-void-shadow --confirm "$CONFIRM" ;;
+            shrink-tape)
+              if [ -n "$MAX_CHUNKS" ]; then
+                python -m src.maintenance --shrink-tape --confirm "$CONFIRM" --max-chunks "$MAX_CHUNKS"
+              else
+                python -m src.maintenance --shrink-tape --confirm "$CONFIRM"
+              fi ;;
+            vacuum-full)       python -m src.maintenance --vacuum-full --confirm "$CONFIRM" ;;
+            purge-markets)     python -m src.maintenance --purge-markets --confirm "$CONFIRM" ;;
+            retire-deploy)     python -m src.maintenance --retire-sha "$RETIRE_SHA" --confirm "$CONFIRM" ;;
+            legacy-positions)  python -m src.maintenance --confirm "$CONFIRM" ;;
+            *) echo "unknown action: $ACTION" >&2; exit 2 ;;
+          esac

@@ -22,6 +22,7 @@ from src.models.orderbook_raw import OrderbookDeltaRaw, OrderbookGap
 from src.models.shadow import ShadowMakerOrder
 from src.models.fees import SeriesFee
 from src.models.cycle_run import CycleRun
+from src.models.halt import HaltEvent
 from src.backtest.models import BacktestRun, BacktestTrade
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "OrderbookDeltaRaw",
     "SeriesFee",
     "CycleRun",
+    "HaltEvent",
     "OrderbookGap",
     "ShadowMakerOrder",
     "WeatherCellFit",

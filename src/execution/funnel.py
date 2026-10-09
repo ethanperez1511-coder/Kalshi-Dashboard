@@ -29,6 +29,7 @@ class ExecutionFunnel:
     qualifying: int = 0
 
     # Terminal buckets, mutually exclusive and exhaustive.
+    halted: int = 0          # a latched kill switch is on: no new trades
     fee_refused: int = 0
     risk_rejected: int = 0
     execution_returned_nothing: int = 0
@@ -83,7 +84,8 @@ class ExecutionFunnel:
 
     def attributed(self) -> int:
         return (
-            self.fee_refused
+            self.halted
+            + self.fee_refused
             + self.risk_rejected
             + self.execution_returned_nothing
             + self.placed
@@ -95,6 +97,7 @@ class ExecutionFunnel:
     def format(self) -> str:
         lines = [
             f"qualifying                  {self.qualifying:>6}",
+            f"  - halted (kill switch)    {self.halted:>6}",
             f"  - fee refused             {self.fee_refused:>6}",
             f"  - risk rejected           {self.risk_rejected:>6}",
             f"  - execution returned none {self.execution_returned_nothing:>6}",

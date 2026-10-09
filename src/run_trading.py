@@ -54,6 +54,7 @@ from src.risk.manager import RiskManager
 from src.trading.engine import TradeEngine, sync_live_bankroll
 from src.trading.settler import Settler
 from src.cycle_lock import cycle_lock
+from src.risk.halts import format_halts
 from src.cycle_log import cycles_digest, format_cycles_digest, ping_deadman, record_cycle
 from src.trading.fee_schedule import BASE_TAKER_RATE, fee_digest, format_fee_digest
 
@@ -187,7 +188,31 @@ def execute_qualifying(
     exec_funnel = ExecutionFunnel(qualifying=len(qualifying))
 
     logger.info("=== Evaluating and executing trades ===")
-    for opp in qualifying:
+    from src.risk import halts
+
+    def _halt_rest(start: int) -> None:
+        for _ in qualifying[start:]:
+            exec_funnel.halted += 1
+
+    if halts.active_halts(engine):
+        logger.error("Trading HALTED (latched kill switch) — %d opportunities not traded",
+                     len(qualifying))
+        _halt_rest(0)
+        return exec_funnel, trades_placed
+
+    for index, opp in enumerate(qualifying):
+        # A model this far from the market is far likelier broken than right.
+        # Refuse, latch, and stop trading for this cycle and every one after.
+        implausible = halts.implausible_edge(opp)
+        if implausible:
+            halts.trip(engine, "implausible_edge", implausible, alert=alerter.send)
+            _halt_rest(index)
+            break
+
+        if index > 0 and halts.active_halts(engine):
+            _halt_rest(index)
+            break
+
         fee_rate, schedule = None, None
         if fee_book is not None:
             opp, schedule, refusal = _apply_fee_schedule(fee_book, opp)
@@ -247,6 +272,11 @@ def execute_qualifying(
                 opp["market_id"], te.last_refusal or "unspecified",
             )
             exec_funnel.record_execution_nothing(te.last_refusal)
+        if result:
+            slipped = halts.fill_slippage(opp.get("evaluated_price"), result.get("price"))
+            if slipped:
+                halts.trip(engine, "fill_slippage", f"{result['market_id']}: {slipped}",
+                           alert=alerter.send)
         if result:
             trades_placed += 1
             exec_funnel.placed += 1
@@ -334,6 +364,14 @@ def run_pipeline(alerter: Alerter | None = None, cycle: int = 0):
             result = _run_pipeline_locked(alerter or Alerter(), cycle, settings, engine)
         except Exception:
             _record_quietly(engine, started, False, source)
+            # Here, not in the trading stage: a cycle that crashes every time
+            # never reaches the trading stage, so the switch would never run.
+            try:
+                from src.risk.halts import check_repeated_errors
+
+                check_repeated_errors(engine)
+            except Exception:
+                logger.warning("repeated-errors check failed (non-fatal)", exc_info=True)
             raise
         _record_quietly(engine, started, True, source)
         # After the record, so a ping always means "a cycle finished".
@@ -345,7 +383,13 @@ def _record_quietly(engine, started, ok, source) -> None:
     """The cycle record is reporting; failing to write it must not turn a
     finished cycle into a failed one."""
     try:
-        record_cycle(engine, started, dt.datetime.now(dt.timezone.utc), ok, source)
+        try:
+            from src.portfolio.equity import total_equity
+
+            equity = total_equity(engine)
+        except Exception:
+            equity = None
+        record_cycle(engine, started, dt.datetime.now(dt.timezone.utc), ok, source, equity=equity)
     except Exception:
         logger.warning("Could not record the cycle (non-fatal)", exc_info=True)
 
@@ -533,6 +577,8 @@ def _run_pipeline_locked(alerter: Alerter, cycle: int, settings: Settings, engin
                 # The funnel in the daily digest as well as the per-cycle run
                 # summary: the Actions page is where a starved scorable set is
                 # diagnosed, but Telegram is where it gets noticed.
+                # First line of the digest whenever a kill switch is latched.
+                _section("🛑 Halts", lambda: format_halts(engine)),
                 _section("🔻 Funnel", lambda: "🔻 " + funnel.headline()),
                 # A schedule that does not fire produces no error, so the only
                 # way to see a gap is to count what ran (2026-10-06, L32).
@@ -597,6 +643,20 @@ def _run_pipeline_locked(alerter: Alerter, cycle: int, settings: Settings, engin
     if not qualifying:
         logger.info("No qualifying opportunities — nothing to trade.")
         return
+
+    # Kill switches that read the whole cycle's state. Each one latches.
+    try:
+        from src.risk.halts import check_cycle_halts
+
+        check_cycle_halts(engine, alerter.send)
+    except Exception:
+        # A switch that cannot be evaluated is not a pass: halt rather than
+        # trade blind.
+        logger.error("Kill-switch evaluation failed — halting", exc_info=True)
+        from src.risk.halts import trip
+
+        trip(engine, "switch_error", "kill-switch evaluation raised; see logs",
+             alert=alerter.send)
 
     from src.trading.fee_schedule import FeeBook, fetch_from_kalshi
 

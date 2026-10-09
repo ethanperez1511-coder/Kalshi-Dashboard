@@ -2072,3 +2072,41 @@ Each defect gets a test shown FAILING on the current code before the fix.
 - [ ] Operator: create the VM per §2 (or §3 fallback); report shape/AD obtained.
 - [ ] Rulings §7: shape + 24/7 cadence on VM; recorder window; PAYG (not now).
 - [ ] Phases B–D only after approval. Cutover by overlap (L32), single writer.
+
+## KILL SWITCHES (9b, ruled 2026-10-09) — PLAN, written before building
+A LATCHED halt: once tripped it stays on until a human clears it with a typed
+token. Halts refuse NEW trades only; settlement keeps running (the settler
+runs before scoring), so open positions still settle.
+
+Store: `halt_events` (switch, detail, tripped_at, cleared_at, cleared_by).
+Active = any row with cleared_at NULL. A Telegram alert on every trip; a
+`🛑 HALTED` line leads the digest while any halt is active.
+
+Switches (thresholds hardcoded in src/risk/halts.py and pinned by a test):
+1. drawdown_latch: equity ≥ 20% below peak. Today's breaker un-trips on a
+   bounce; this one does not.
+2. bankroll_drop: equity ≥ 10% below its 24 h high (equity recorded per
+   cycle in cycle_runs).
+3. implausible_edge (pre-trade): |p_model - fill price| ≥ 40 points on an
+   opportunity about to execute. That is a broken model, not a bargain. The
+   trade is refused and the halt trips.
+4. fill_slippage (post-fill): |fill - evaluated| ≥ 3c (live fills; paper
+   already refuses any divergence).
+5. repeated_errors: the last 3 cycles all failed (cycle_runs ok=False).
+6. stale_inputs: newest price snapshot > 60 min old when execution starts
+   (ingest silently produced nothing).
+
+Clear: `python -m src.maintenance --clear-halt --confirm CLEAR-HALT` (dry run
+lists active halts). maintenance.yml's inputs are consolidated into one
+`action` choice so the clear is reachable from Actions before migration.
+
+Safety:
+- Over-exposure: halts can only REFUSE trades. They never place or close
+  orders and never touch limits, Kelly, mode or the live gate.
+- Accidental live: no code path reads or writes `mode`.
+- DB integrity: one INSERT per trip, one UPDATE per clear, each in its own
+  committed transaction.
+
+Each switch gets a test that trips it, a test that it stays latched after
+the condition clears, a test that it blocks the next trade, and a test that
+only the token clears it.

@@ -34,10 +34,10 @@ KEEP_DAYS = 60
 
 
 def record_cycle(engine: Engine, started: dt.datetime, finished: dt.datetime,
-                 ok: bool, source: str) -> None:
+                 ok: bool, source: str, equity: Optional[float] = None) -> None:
     with get_session(engine) as session:
         session.add(CycleRun(started_at=started, finished_at=finished, ok=ok,
-                             source=(source or "manual")[:60]))
+                             source=(source or "manual")[:60], equity=equity))
         session.execute(delete(CycleRun).where(
             CycleRun.started_at < started - dt.timedelta(days=KEEP_DAYS)
         ))
