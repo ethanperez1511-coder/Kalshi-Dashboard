@@ -1,8 +1,14 @@
 # Oracle Cloud migration: spec (for approval, nothing built)
 
-**Status:** draft for operator approval, 2026-10-07. Nothing has been
-provisioned or changed. The account is Always Free, home region US East
-(Ashburn), not upgraded, with no resources created.
+**Status:** rulings merged 2026-10-09 (shape, 24/7 cadence, 3-day parallel
+run, backups, SSH recovery). Nothing has been provisioned yet. The account is
+Always Free, home region US East (Ashburn), not upgraded.
+
+**Layout:** all migration work lives in `deploy/oracle/` on branch
+`migration/oracle`, so it can never collide with trading-code changes on main.
+- `SPEC.md`: this file.
+- `BACKUP.md`: backups and the restore drill.
+- `RUNBOOK.md`: operating the system after cutover.
 
 **Why move:** GitHub's scheduler delivered ~5–8 of 96 cycles a day, and the
 session's triggers fired 0 of 10 on days 1–2. Neon's caps (1 GB storage,
@@ -42,8 +48,8 @@ cron is local and exact, and storage and compute are not metered per use.
 - The recorder: a long-running websocket process.
 - Light dependencies (FastAPI, SQLAlchemy, httpx, psycopg); no numpy/pandas.
 
-**Recommended: VM.Standard.A1.Flex, 2 OCPU / 12 GB** (the whole Always Free A1
-allowance, in one VM).
+**RULED: VM.Standard.A1.Flex, 2 OCPU / 12 GB first; 1 OCPU / 6 GB as the
+fallback** (§3).
 
 | Component | Expected resident memory |
 |---|---|
@@ -69,18 +75,18 @@ allowance, in one VM).
 - CPU: if cycles run only in the 15–21 UTC session, the VM is busy ~5% of the
   day, so CPU p95 will be under 20%. All three criteria would plausibly hold,
   and the VM would be reclaimable.
-- **Mitigation built into this design:** on the VM, cycles run every 15
-  minutes **around the clock**, the original cadence. The "zero off-session
+- **Mitigation (RULED 2026-10-09):** on the VM, cycles run every 15 minutes
+  **around the clock**, the original cadence. The "zero off-session
   cycles" rule existed to save Neon compute, which no longer applies.
   - 96 cycles a day at ~2–3 min each puts CPU p95 well above 20% from real
     work.
   - Reclamation needs all three criteria to hold, so CPU alone keeps the VM
     out of it. No artificial load.
-- **Proof, not assumption:** after week 1, read the instance's CPU metric
-  (Compute → instance → Metrics). If CPU p95 is under 25%, escalate:
+- **Proof, not assumption (RULED: day 7 after cutover):** read the
+  instance's CPU, network and memory metrics (Compute → instance → Metrics). If CPU p95 is under 25%, escalate:
   1. Drop to **1 OCPU / 6 GB**, which roughly doubles CPU % and memory %.
-  2. Or upgrade to Pay As You Go, after confirming the exemption in writing
-     from Oracle.
+  2. Or upgrade to Pay As You Go. The exemption from reclamation stays
+     **UNVERIFIED** until Oracle confirms it in writing.
 - **Backups (below) make reclamation recoverable either way.**
 
 ---
@@ -157,7 +163,39 @@ pbcopy < ~/.ssh/oci_kalshi.pub      # copies the PUBLIC key only
 6. OCI's Ubuntu image also ships a host firewall (iptables) that allows only
    SSH. Leave it; don't enable ufw on top of it.
 
-### 2.4 First login check
+### 2.4 SSH recovery when your IP changes (e.g. travelling)
+
+The /32 rule means SSH stops working the moment your public IP changes.
+Recovery takes about two minutes, from any browser:
+
+1. On the device you will SSH from, find its public IP: `curl -4 ifconfig.me`
+   (or open ifconfig.me in a phone browser on the same network).
+2. Sign in at **cloud.oracle.com** (your MFA device is needed; keep it with
+   you).
+3. ☰ → **Networking** → **Virtual cloud networks** → your VCN → **Subnets** →
+   the public subnet → **Security** → **Default Security List** → **Ingress
+   rules**.
+4. **Add Ingress Rules** (ADD, don't replace, so home still works):
+   - Source type CIDR
+   - Source `<that IP>/32`
+   - IP protocol TCP
+   - Destination port range `22`
+   - Description `travel YYYY-MM-DD`
+   - **Add**
+5. `ssh -i ~/.ssh/oci_kalshi ubuntu@<vm-ip>`. Security-list changes apply
+   within seconds.
+6. Back home, delete the `travel` rule.
+
+**Mobile and hotel networks often change IP every connection (carrier NAT),**
+so you would repeat this often. That is the case for the second admin path
+(§7 item 4): OCI Bastion gives time-limited SSH sessions through your console
+login, with no IP rule to maintain. The one thing never to do is open 22 to
+0.0.0.0/0 "temporarily".
+
+**Your MFA device is the single point of failure for both paths.** Keep
+Oracle's recovery codes somewhere other than the phone.
+
+### 2.5 First login check
 
 ```bash
 ssh -i ~/.ssh/oci_kalshi ubuntu@<public-ip>
@@ -165,7 +203,7 @@ uname -m          # aarch64
 nproc; free -g    # 2 / ~11
 ```
 
-### 2.5 Cost guard (free, belt and braces)
+### 2.6 Cost guard (free, belt and braces)
 
 ☰ → **Billing & Cost Management** → **Budgets** → create a budget of **$1**
 with an email alert at 100%. On an un-upgraded account nothing can bill, but
@@ -217,6 +255,21 @@ Ashburn A1 capacity is often exhausted. In order:
   - `ODDS_API_KEY` stays **unset until cutover** (it is shared quota)
   - `DATABASE_URL` = local Postgres
 
+### What 24/7 cycles do outside the weather pricing window (checked in code)
+- **Weather refuses cleanly.** Every refusal is a counted `return None`
+  (`lead_past`, `mos_unavailable`, …), and MOS network failures are converted
+  to `MosUnavailable`. Overnight cycles therefore show refusals in the funnel,
+  not errors.
+- **The lead gate counts the station's local day** (`c74f04d`), so a lead-1
+  ladder is priceable from 14:00 UTC (when Kalshi lists it) until local
+  midnight.
+- **Settlement does not depend on pricing.** The settler runs before scoring
+  in every cycle and asks Kalshi for the result of each open position, so
+  overnight cycles settle as soon as Kalshi finalises a market.
+- **One residual risk, not weather-specific:** an unexpected exception inside
+  any model aborts that cycle's scoring. Settlement has already run by then,
+  so it fails safe. The kill-switch work counts repeated cycle errors.
+
 ### Phase C: services (systemd, not cron)
 | Unit | Schedule |
 |---|---|
@@ -232,14 +285,36 @@ The cycle-count digest line and the dead-man ping work unchanged.
 1. **Seed.** On the VM, `pg_dump` from Neon and `pg_restore` locally. You type
    the Neon connection string into the VM's shell; it never goes in a chat or
    the repo. About 740 MB, within Neon's 5 GB egress.
-2. **Overlap, 7 days.** The VM runs every service on its **own copy**.
-   GitHub + Neon stay canonical.
-   - Its Telegram goes to a separate chat (or is off), so alerts are never
-     doubled.
+2. **Parallel run: 3 CLEAN DAYS (ruled 2026-10-09).** The VM runs every
+   service on its **own copy**; GitHub + Neon stay canonical.
+   - Its Telegram goes to a separate chat, so alerts are never doubled.
    - `ODDS_API_KEY` stays unset, so the shared Odds quota is not spent twice.
-   - VM trades during overlap are validation only and are **never** merged
-     into the canonical record.
-   - Compare the VM's digests with GitHub's daily.
+   - VM trades are validation only and never merge into the canonical record.
+
+   **A clean day** is a UTC day on which ALL of these hold:
+   1. **Cycles:** ≥ 92 of 96 completed `ok` in `cycle_runs`, and 0 failed.
+   2. **Recorder:** connected for ≥ 95% of its configured window, with 0
+      sequence gaps that lack a matching reconnect.
+   3. **Dead-man:** the VM's healthchecks.io check (a separate one from the
+      GitHub check) green all day.
+   4. **Timers:** retention, refit (if due) and live-checks each ran once, on
+      time, green.
+   5. **Logs:** no ERROR-level line outside the known, documented ones.
+
+   **What to compare, the same day, VM against GitHub canonical:**
+   - **Settlements.** Every position both databases hold (seeded from the same
+     dump) settles on both, with identical result and PnL to the cent.
+   - **Pricing determinism.** For 5 weather contracts priced by both within
+     the same hour (same MOS run, same fit), `p_model` must be identical.
+     A difference means the two hosts are not running the same code or data.
+   - **Funnel shape.** The VM's `🔁 Cycles 24h` shows ~96 against GitHub's
+     handful. Its weather "priced" count is at least GitHub's at matching
+     hours.
+   - **Storage.** The VM's daily MB growth is consistent with the tape window
+     (no runaway table).
+
+   **Pass:** three consecutive clean days. **Fail:** a day that isn't clean
+   restarts the count, with its cause written down first.
 3. **Cutover (one sitting, about 30 min):**
    1. Disable every GitHub schedule (keep the files).
    2. Wait for any running Actions job to finish.
@@ -251,7 +326,7 @@ The cycle-count digest line and the dead-man ping work unchanged.
    re-enable the GitHub schedules. Neon is not modified after cutover and is
    kept untouched for 14 days.
 
-### Backups (reclamation and disk failure)
+### Backups (reclamation, account loss, disk failure): full design in BACKUP.md
 - **Nightly `pg_dump`** → OCI Object Storage (20 GB free). Upload through a
   **write-only pre-authenticated request URL**, so the VM holds no OCI API
   credentials. Keep 14 dumps.
@@ -285,24 +360,45 @@ The cycle-count digest line and the dead-man ping work unchanged.
 
 ## 6. Acceptance (before cutover)
 
-- [ ] Seven overlap days: the VM's "Cycles 24h" line shows ≥ 90 cycles a day
-      on the VM's own copy.
+- [ ] Three consecutive CLEAN DAYS (definition in Phase D).
 - [ ] The recorder's coverage matches the configured window, with no
       unexplained gaps.
 - [ ] The dead-man check stays green through the overlap.
-- [ ] The CPU p95 metric (OCI console) is ≥ 25%, or a ruling on 1 OCPU or PAYG
-      has been made.
+- [ ] (After cutover, day 7) CPU p95 / network / memory metrics read; ruling
+      if CPU p95 < 25%.
 - [ ] A restore drill from the nightly dump has passed.
 - [ ] The full test suite has been run ON THE VM against its local Postgres
       (`TEST_POSTGRES_URL`), including the 10 Postgres-only tests.
 
 ---
 
-## 7. Decisions for the operator
+## 7. Rulings still needed (one per line, with my recommendation)
 
-1. Approve the shape (2 OCPU / 12 GB) and the 24/7 cycle cadence on the VM
-   (the counter to idle reclamation).
-2. Recorder window on the VM: 15–21 UTC as now, or 24/7? Storage stops
-   binding at 100 GB, so this is about evidence per hour, not cost.
-3. Whether to upgrade to Pay As You Go: not needed to start. Revisit only if
-   capacity or the week-1 CPU metric forces it.
+Already ruled: the shape and its fallback; 24/7 cycles; a 3-clean-day parallel
+run; the reclaim check on day 7 after cutover; PAYG exemption kept
+UNVERIFIED; an independent weekly backup.
+
+1. **Recorder window on the VM.** Recommend **24/7**: storage stops binding,
+   and every rest window a shadow order spans is then covered (no more
+   "unproven: not subscribed").
+2. **Storage budget on the VM.** Recommend **20 GB** of the 100 GB boot
+   volume. Keep the 14-day tape and 2-day payload rules; re-base the cap
+   defense on disk instead of Neon's 1 GB.
+3. **Telegram during the parallel run.** Recommend a **separate chat** (not
+   off), so the VM's alerts are visible but never confused with production.
+4. **Second admin path.** Recommend **OCI Bastion** (free, Oracle-managed, no
+   standing open port, uses your console login). Tailscale if the Bastion
+   plugin is unavailable on the Ubuntu image (verify at provisioning).
+5. **Independent backup target.** Recommend **Backblaze B2** with a
+   write-only key and **age** encryption (BACKUP.md), plus a monthly manual
+   copy to your Mac.
+6. **Pay As You Go.** Recommend **not now**; revisit only if capacity or the
+   day-7 metrics force it.
+7. **Deploy policy.** Recommend **human-triggered `kalshi-deploy <sha>` over
+   SSH**: the full test suite runs on the VM and must pass before services
+   restart. No auto-pull and no GitHub credential on the VM.
+8. **Neon after cutover.** Recommend keeping it **untouched for 14 days** (the
+   rollback window), then deleting the project.
+9. **GitHub workflows after cutover.** Recommend **disabling schedules at
+   cutover**, then deleting the workflow files in their own commit after the
+   14-day window.
