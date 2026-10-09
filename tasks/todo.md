@@ -2110,3 +2110,7 @@ Safety:
 Each switch gets a test that trips it, a test that it stays latched after
 the condition clears, a test that it blocks the next trade, and a test that
 only the token clears it.
+- [x] 9a: station-local lead day (c74f04d, 2026-10-07).
+- [x] 9b: kill switches (5c24fc6). 22 tests; 1275 total.
+- [x] 9c: size ramp DESIGN in docs/size-ramp.md, awaiting approval before
+      build. Must land before gate 50 (currently 38).
