@@ -19,7 +19,6 @@ from src.maintenance.tape import (
 )
 from src.maintenance.retention import (
     MB,
-    STORAGE_BUDGET_BYTES,
     apply_retention,
     database_size_bytes,
     defend_cap,
@@ -47,6 +46,7 @@ def main(argv=None) -> int:
     engine = get_engine(settings.DATABASE_URL)
     verify_or_migrate(engine, migrate=settings.MIGRATE_ON_BOOT, context="retention")
 
+    failed_steps = []
     plan = plan_retention(engine) if args.dry_run else apply_retention(engine)
     text = format_plan(plan, applied=not args.dry_run)
     print(text)
@@ -62,8 +62,12 @@ def main(argv=None) -> int:
         print("\n" + tape_text)
         text += "\n\n" + tape_text
     except Exception:
-        logger.warning("Tape compaction failed (non-fatal)", exc_info=True)
+        # Not "non-fatal" any more: the 2-day payload rule is how the tape
+        # stays inside the cap, and this failed silently from August to
+        # 2026-10-12 (a NOT NULL left on the column). A failed step is red.
+        logger.error("Tape compaction FAILED", exc_info=True)
         text += "\n\nTAPE COMPACTION FAILED — see logs"
+        failed_steps.append("tape compaction")
 
     # Plain VACUUM after both passes, so the space deletes and payload-nulling
     # freed is reused rather than extended. Measured again afterwards: that is
@@ -81,6 +85,7 @@ def main(argv=None) -> int:
         except Exception:
             logger.error("VACUUM failed — freed space will not be reused", exc_info=True)
             text += "\n\nVACUUM FAILED — see logs"
+            failed_steps.append("VACUUM")
 
     # Cap defense (ruling C). Alerts go to Telegram on every step.
     if not args.dry_run:
@@ -96,23 +101,22 @@ def main(argv=None) -> int:
         except Exception:
             logger.error("Cap defense failed", exc_info=True)
             text += "\n\nCAP DEFENSE FAILED — see logs"
+            failed_steps.append("cap defense")
 
-    # Red means LIVE data over our budget after pruning (dead pages are
-    # reused, and are reported, not alarmed), or the file near Neon's cap,
-    # which counts dead pages too. Either way it goes red with headroom left.
-    over = not args.dry_run and (plan.over_budget or plan.cap_alarm)
-    write_summary(
-        f"Retention: {size_status(plan.size_bytes, plan.live_bytes)}, "
-        f"{plan.total_deletions:,} rows removed",
-        text, ok=not over,
-    )
+    # Red means one of two things: the file is at the fail line of Neon's
+    # cap, or a retention step failed. Never "over a budget" while healthy.
+    over = not args.dry_run and plan.cap_fail
+    red = over or bool(failed_steps)
+    headline = f"Retention: {size_status(plan.size_bytes, plan.live_bytes)}, {plan.total_deletions:,} rows removed"
+    if failed_steps:
+        headline += f" — FAILED: {', '.join(failed_steps)}"
+    write_summary(headline, text, ok=not red)
     if over:
-        logger.error(
-            "Over the %.0f MB budget or near the cap after pruning and VACUUM: %s",
-            STORAGE_BUDGET_BYTES / MB, size_status(plan.size_bytes, plan.live_bytes),
-        )
-        return 1
-    return 0
+        logger.error("File at the %.0f%% fail line of the Neon cap: %s",
+                     100 * plan.cap_fraction, size_status(plan.size_bytes, plan.live_bytes))
+    if failed_steps:
+        logger.error("Retention steps failed: %s", ", ".join(failed_steps))
+    return 1 if red else 0
 
 
 if __name__ == "__main__":

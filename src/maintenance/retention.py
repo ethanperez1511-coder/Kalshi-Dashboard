@@ -24,13 +24,15 @@ statement, recent days included, and re-anchored. The database hit the cap on
 until the cap was raised on 2026-10-01: twenty days dark. Ruling 2026-10-06:
 the window rolls.
 
-Two sizes, kept apart on purpose:
+Thresholds on the FILE (what Neon counts), against Neon's 1 GB cap
+(ruling 2026-10-12, replacing a 500 MB "budget" left over from the old tier):
 
-  NEON_CAP_BYTES        the provider's hard limit. At it, writes AND deletes
-                        are refused and cleanup deadlocks. A fact, not a choice.
-  STORAGE_BUDGET_BYTES  our target, well under the cap. Retention goes red when
-                        it cannot hold this, so the warning arrives with half
-                        the cap still free. September's lesson is headroom.
+  CAP_WARN_FRACTION   75%  digest warns
+  CAP_ALARM_FRACTION  85%  digest 🚨, and the cap defense may cut tape days
+  CAP_FAIL_FRACTION   90%  retention exits 1
+
+Retention is also red when any of its steps fails. Live data is reported, not
+judged: dead pages are reused, and the file is what reaches the cap.
 """
 from __future__ import annotations
 
@@ -53,11 +55,10 @@ MB = 1_000_000
 # Taken as DECIMAL GB, the smaller reading: the console counts in decimal
 # units, and if the cap is in fact 1 GiB this only errs early.
 NEON_CAP_BYTES = 1000 * MB
-# Our own ceiling. Red above this, after pruning.
-STORAGE_BUDGET_BYTES = 500 * MB
-# Fraction of the CAP at which the digest escalates to 🚨. Past here the next
-# few days of growth can deadlock cleanup.
+CAP_WARN_FRACTION = 0.75
+# Past here the next few days of growth can deadlock cleanup.
 CAP_ALARM_FRACTION = 0.85
+CAP_FAIL_FRACTION = 0.90
 
 # Price snapshots: full resolution recently, then one per market per hour, then
 # one per market per day, then gone.
@@ -100,14 +101,16 @@ class RetentionPlan:
         return self.size_bytes / NEON_CAP_BYTES
 
     @property
-    def over_budget(self) -> bool:
-        # The budget governs how much data we keep, so it reads live data.
-        judged = self.live_bytes if self.live_bytes is not None else self.size_bytes
-        return judged > STORAGE_BUDGET_BYTES
+    def cap_warn(self) -> bool:
+        return self.cap_fraction >= CAP_WARN_FRACTION
 
     @property
     def cap_alarm(self) -> bool:
         return self.cap_fraction >= CAP_ALARM_FRACTION
+
+    @property
+    def cap_fail(self) -> bool:
+        return self.cap_fraction >= CAP_FAIL_FRACTION
 
     @property
     def total_deletions(self) -> int:
@@ -350,21 +353,18 @@ def apply_retention(engine: Engine, now: Optional[dt.datetime] = None) -> Retent
 
 
 def size_status(size_bytes: int, live_bytes: Optional[int] = None) -> str:
-    """Budget and cap in one phrase, so neither number appears alone. With a
-    live measurement, the file is read against the cap and the live data
-    against the budget, and the difference is named as reusable space."""
-    if live_bytes is None:
-        return (
-            f"{size_bytes / MB:.0f} MB — {size_bytes / STORAGE_BUDGET_BYTES:.0%} of "
-            f"{STORAGE_BUDGET_BYTES / MB:.0f} MB budget, "
-            f"{size_bytes / NEON_CAP_BYTES:.0%} of {NEON_CAP_BYTES / MB:.0f} MB Neon cap"
-        )
-    return (
+    """The file against the cap, and live data alongside it when measured."""
+    line = (
         f"{size_bytes / MB:.0f} MB file ({size_bytes / NEON_CAP_BYTES:.0%} of "
-        f"{NEON_CAP_BYTES / MB:.0f} MB Neon cap) · ~{live_bytes / MB:.0f} MB live "
-        f"({live_bytes / STORAGE_BUDGET_BYTES:.0%} of {STORAGE_BUDGET_BYTES / MB:.0f} MB "
-        f"budget) · {max(size_bytes - live_bytes, 0) / MB:.0f} MB reusable"
+        f"{NEON_CAP_BYTES / MB:.0f} MB Neon cap; warn {CAP_WARN_FRACTION:.0%}, "
+        f"fail {CAP_FAIL_FRACTION:.0%})"
     )
+    if live_bytes is not None:
+        line += (
+            f" · ~{live_bytes / MB:.0f} MB live · "
+            f"{max(size_bytes - live_bytes, 0) / MB:.0f} MB reusable"
+        )
+    return line
 
 
 def format_plan(plan: RetentionPlan, applied: bool = False) -> str:
@@ -382,20 +382,12 @@ def format_plan(plan: RetentionPlan, applied: bool = False) -> str:
             f"  🚨 at {plan.cap_fraction:.0%} of the Neon cap — at 100% Neon "
             f"refuses writes AND deletes, and retention cannot run"
         )
-    elif plan.over_budget:
-        lines.append(
-            "  ⚠️ live data over budget after pruning: the write rate or the "
-            "window is the problem, not dead pages"
-        )
-    elif plan.live_bytes is not None and plan.size_bytes > STORAGE_BUDGET_BYTES:
-        lines.append(
-            "  file over budget but live data under it: dead pages, reused by "
-            "new writes. To return them to Neon: maintenance shrink_tape"
-        )
+    elif plan.cap_warn:
+        lines.append(f"  ⚠️ file at {plan.cap_fraction:.0%} of the Neon cap (warn line)")
     return "\n".join(lines)
 
 
 def format_size_line(plan: RetentionPlan) -> str:
     """One line for the daily digest."""
-    mark = "🚨" if plan.cap_alarm else ("⚠️" if plan.over_budget else "💾")
+    mark = "🚨" if plan.cap_alarm else ("⚠️" if plan.cap_warn else "💾")
     return f"{mark} DB: {size_status(plan.size_bytes, plan.live_bytes)}"

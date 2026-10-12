@@ -14,7 +14,7 @@ import sys
 import pytest
 
 import src.maintenance.retention as retention
-from src.maintenance.retention import NEON_CAP_BYTES, STORAGE_BUDGET_BYTES
+from src.maintenance.retention import NEON_CAP_BYTES
 from src.maintenance.vacuum_full import (
     CONFIRM_TOKEN,
     TableStat,
@@ -100,16 +100,8 @@ def _run_prune(engine, monkeypatch, size_bytes):
 
 
 class TestRetentionVerdict:
-    def test_under_budget_is_green(self, seeded, monkeypatch):
-        assert _run_prune(seeded, monkeypatch, STORAGE_BUDGET_BYTES - MB) == 0
+    """Thresholds moved to the cap (2026-10-12); see test_retention_verdict.py."""
 
-    def test_over_budget_is_red_while_far_below_the_cap(self, seeded, monkeypatch):
-        """Red at 600 MB, 59% of the cap. The old code went red against a
-        stale 512 MiB tier and then stayed red for 26 days, until red meant
-        nothing. Red now means over OUR budget, with headroom left to act."""
-        assert _run_prune(seeded, monkeypatch, 600 * MB) == 1
-
-    def test_the_old_tier_constant_no_longer_judges_anything(self, seeded, monkeypatch):
-        """470 MB was 92% of the 512 MiB tier, so the old code exited 1.
-        It is under budget."""
-        assert _run_prune(seeded, monkeypatch, 470 * MB) == 0
+    def test_the_old_500_mb_budget_judges_nothing(self, seeded, monkeypatch):
+        """600 MB went red under the stale budget. It is 60% of the cap."""
+        assert _run_prune(seeded, monkeypatch, 600 * MB) == 0

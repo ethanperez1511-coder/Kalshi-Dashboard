@@ -40,7 +40,7 @@ from src.maintenance.retention import (
     DELTA_RETENTION_DAYS,
     MB,
     NEON_CAP_BYTES,
-    STORAGE_BUDGET_BYTES,
+    CAP_WARN_FRACTION,
     database_size_bytes,
     size_status,
 )
@@ -452,7 +452,7 @@ def format_report(m: TapeMeasure, result: Optional[ShrinkResult] = None,
     ):
         tape = steady_state_bytes(m, window, slim)
         total = tape + other
-        verdict = "fits budget" if total <= STORAGE_BUDGET_BYTES else "OVER budget"
+        verdict = "under warn line" if total < CAP_WARN_FRACTION * NEON_CAP_BYTES else "OVER warn line"
         lines.append(f"    {label:44s} tape {tape / MB:>5.0f} MB  total ~{total / MB:>5.0f} MB  {verdict}")
 
     future = project_live_bytes(m, now=now)

@@ -18,7 +18,7 @@ from src.maintenance.retention import (
     DELTA_RETENTION_DAYS,
     NEON_CAP_BYTES,
     SNAPSHOT_MAX_DAYS,
-    STORAGE_BUDGET_BYTES,
+    CAP_WARN_FRACTION,
     RetentionPlan,
     apply_retention,
     database_size_bytes,
@@ -151,13 +151,11 @@ class TestTapeRetention:
         assert DELTA_RETENTION_DAYS * 49.5 * 1_000_000 < NEON_CAP_BYTES
 
 
-class TestBudgetAndCap:
-    """The cap is Neon's; the budget is ours. Neither may drift into the other."""
+class TestCapLines:
+    """Warn / alarm / fail on the FILE against Neon's cap (2026-10-12)."""
 
-    def test_the_budget_sits_well_under_the_cap(self):
-        """The September lesson: headroom. At least 40% of the cap stays
-        free when the budget is first breached."""
-        assert STORAGE_BUDGET_BYTES <= 0.6 * NEON_CAP_BYTES
+    def test_the_lines_are_ordered(self):
+        assert CAP_WARN_FRACTION < CAP_ALARM_FRACTION < 0.90
 
     def test_the_cap_is_the_current_neon_free_limit_read_conservatively(self):
         """1 GB as the console counts it (decimal), not 1 GiB."""
@@ -167,58 +165,29 @@ class TestBudgetAndCap:
         _snap(engine, "M", NOW)
         assert database_size_bytes(engine) > 0
 
-    def test_under_budget_is_calm(self):
-        line = format_size_line(RetentionPlan(size_bytes=400 * 1_000_000))
-        assert line.startswith("💾")
-
-    def test_over_budget_warns_long_before_the_cap(self):
-        plan = RetentionPlan(size_bytes=600 * 1_000_000)
-        assert plan.over_budget and not plan.cap_alarm
-        assert format_size_line(plan).startswith("⚠️")
+    def test_below_the_warn_line_is_calm(self):
+        assert format_size_line(RetentionPlan(size_bytes=600 * 1_000_000)).startswith("💾")
 
     def test_near_the_cap_escalates(self):
         plan = RetentionPlan(size_bytes=int(CAP_ALARM_FRACTION * NEON_CAP_BYTES) + 1)
         assert format_size_line(plan).startswith("🚨")
         assert "refuses writes AND deletes" in format_plan(plan, applied=True)
 
-    def test_todays_size_reads_as_the_console_does(self):
-        """The console said 762 MB on 2026-10-06, while the heartbeat said
-        '721 MB (134% of free tier)': MiB against a stale 512 MiB constant.
-        The same bytes must now print the console's number."""
-        line = format_size_line(RetentionPlan(size_bytes=761_960_000))
-        assert line.startswith("⚠️ DB: 762 MB")
-        assert "152% of 500 MB budget" in line
-        assert "76% of 1000 MB Neon cap" in line
-        assert line.startswith("⚠️")
+    def test_the_line_reads_as_the_console_does(self):
+        line = format_size_line(RetentionPlan(size_bytes=807_000_000, live_bytes=761_000_000))
+        assert line.startswith("⚠️ DB: 807 MB file")
+        assert "81% of 1000 MB Neon cap" in line and "~761 MB live" in line
 
 
-class TestLiveDataVersusFile:
-    """Neon counts the FILE, so the cap alarm reads the file. The budget is a
-    policy on how much data we keep, so it reads LIVE data. After the first
-    rolling prune, a 738 MB file held about a third of that live, and the
-    digest called it 'over budget' when the excess was dead pages."""
-
-    def test_dead_pages_do_not_read_as_a_budget_breach(self):
-        plan = RetentionPlan(size_bytes=738 * 1_000_000, live_bytes=300 * 1_000_000)
-        line = format_size_line(plan)
-        assert not plan.over_budget
-        assert line.startswith("💾")
-        assert "738 MB file" in line and "~300 MB live" in line
-        assert "438 MB reusable" in line
-
-    def test_live_data_over_budget_is_the_real_alarm(self):
-        plan = RetentionPlan(size_bytes=738 * 1_000_000, live_bytes=620 * 1_000_000)
-        assert plan.over_budget
-        assert format_size_line(plan).startswith("⚠️")
+class TestLiveDataIsReportedNotJudged:
+    def test_dead_pages_and_live_data_both_show(self):
+        line = format_size_line(RetentionPlan(size_bytes=738 * 1_000_000, live_bytes=300 * 1_000_000))
+        assert "738 MB file" in line and "~300 MB live" in line and "438 MB reusable" in line
 
     def test_the_cap_alarm_reads_the_file_whatever_is_live(self):
         """Dead pages still count against Neon's cap."""
         plan = RetentionPlan(size_bytes=900 * 1_000_000, live_bytes=100 * 1_000_000)
         assert format_size_line(plan).startswith("🚨")
-
-    def test_without_a_live_measurement_the_file_is_judged(self):
-        plan = RetentionPlan(size_bytes=600 * 1_000_000)
-        assert plan.over_budget
 
     def test_live_estimate_is_none_off_postgres(self, engine):
         from src.maintenance.retention import live_bytes_estimate

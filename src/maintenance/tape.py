@@ -32,7 +32,7 @@ import logging
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from sqlalchemy import Engine, and_, func, select
+from sqlalchemy import Engine, and_, func, select, text
 
 from src.database import get_session
 from src.maintenance.retention import NEON_CAP_BYTES, database_size_bytes
@@ -53,6 +53,18 @@ BATCH = 20_000
 # Each UPDATE writes a new row version before VACUUM reclaims the old one, so
 # the pass itself adds storage. It stops before the cap can be approached.
 CAP_STOP_FRACTION = 0.90
+# An UPDATE writes a new row version before the old one is reclaimed. With
+# little free space (46 MB in production on 2026-10-12) a single long pass
+# would grow the file by the size of every new version. A plain VACUUM every
+# few batches frees the old versions so the next batches reuse their space.
+VACUUM_EVERY_BATCHES = 1
+# Rows nulled per run. Each nulled row adds a new entry to all four indexes
+# before VACUUM can reclaim the old ones: measured on Postgres 16, 432k rows
+# grew a 313 MB table by 44 MB even with VACUUM after every batch. Production
+# had ~765k rows of backlog and 46 MB of free space at 807 MB (2026-10-12), so
+# one pass would end near the 90% line. Capped, the backlog clears over a few
+# daily runs at ~+20 MB each; the steady daily flow (~70k) sits well under it.
+MAX_ROWS_PER_RUN = 200_000
 
 
 @dataclass
@@ -109,36 +121,46 @@ def compact_tape(
     """Apply the plan. Nulls delta payloads older than the window."""
     now = now or dt.datetime.now(dt.timezone.utc)
     nulled = 0
+    batches = 0
     stopped = ""
 
     while True:
+        if nulled >= MAX_ROWS_PER_RUN:
+            stopped = f"run cap: {MAX_ROWS_PER_RUN:,} rows nulled; the rest continues next run"
+            logger.info("Tape compaction: %s", stopped)
+            break
         if database_size_bytes(engine) >= CAP_STOP_FRACTION * NEON_CAP_BYTES:
             stopped = f"cap guard: database at {CAP_STOP_FRACTION:.0%} of the Neon cap"
             logger.error("Tape compaction stopped: %s", stopped)
             break
         with get_session(engine) as session:
-            ids = [
-                row[0] for row in session.execute(
-                    select(OrderbookDeltaRaw.id)
-                    .where(
-                        OrderbookDeltaRaw.msg_type.notin_(PAYLOAD_ALWAYS_KEPT),
-                        OrderbookDeltaRaw.received_at < plan.cutoff,
-                        OrderbookDeltaRaw.payload.isnot(None),
-                    )
-                    .limit(BATCH)
-                ).all()
-            ]
-            if not ids:
-                break
+            # One statement per batch, ids chosen by the server: no id list
+            # crosses the wire and no bind-parameter count grows with BATCH.
+            batch = (
+                select(OrderbookDeltaRaw.id)
+                .where(
+                    OrderbookDeltaRaw.msg_type.notin_(PAYLOAD_ALWAYS_KEPT),
+                    OrderbookDeltaRaw.received_at < plan.cutoff,
+                    OrderbookDeltaRaw.payload.isnot(None),
+                )
+                .limit(min(BATCH, MAX_ROWS_PER_RUN - nulled))
+                .scalar_subquery()
+            )
             result = session.execute(
                 OrderbookDeltaRaw.__table__.update()
-                .where(OrderbookDeltaRaw.id.in_(ids))
+                .where(OrderbookDeltaRaw.id.in_(batch))
                 .values(payload=None)
             )
+            if not result.rowcount:
+                break
             if _before_commit is not None:
                 _before_commit(session)          # test hook: a kill mid-batch
             session.commit()
             nulled += result.rowcount or 0
+            batches += 1
+        if batches % VACUUM_EVERY_BATCHES == 0 and engine.dialect.name == "postgresql":
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+                conn.execute(text("VACUUM orderbook_delta_raw"))
 
     logger.info(
         "Tape compaction: nulled %d delta payloads older than %d days",

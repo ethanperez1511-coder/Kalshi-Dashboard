@@ -123,3 +123,18 @@ def test_it_stops_at_ninety_percent_of_the_cap(engine, monkeypatch):
     assert result["nulled"] == 0
     assert "cap" in result["stopped"]
     assert not any(_nulled(engine))
+
+
+def test_one_run_stops_at_its_row_cap_and_the_next_run_continues(engine, monkeypatch):
+    """The first production pass had ~765k rows of backlog; nulling them in one
+    run would have grown the file to the 90% line (index churn)."""
+    monkeypatch.setattr(tape, "BATCH", 4)
+    monkeypatch.setattr(tape, "MAX_ROWS_PER_RUN", 10)
+    _rows(engine, "delta", hours_ago=72, n=25)
+
+    first = _compact(engine)
+    assert first["nulled"] == 10 and "run cap" in first["stopped"]
+    second = _compact(engine)
+    third = _compact(engine)
+    assert second["nulled"] == 10 and third["nulled"] == 5
+    assert all(_nulled(engine))
