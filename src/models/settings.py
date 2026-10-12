@@ -34,6 +34,10 @@ class TradingSettings(Base):
     # Highest paper-trade milestone already announced (the gate counts as
     # one). Announcement only; it gates nothing.
     last_milestone_alerted: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    # Live size ramp (docs/size-ramp.md). NULL reads as stage 0. Only
+    # src.risk.ramp writes these; it can only lower a live trade's size.
+    ramp_stage: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    ramp_stage_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, default=None)
 
     @classmethod
     def get_or_create(cls, engine: Engine) -> TradingSettings:

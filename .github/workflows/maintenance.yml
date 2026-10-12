@@ -36,6 +36,7 @@ on:
           - pending-matches     # read-only: Polymarket review queue
           - day7                # read-only: trade-through measurement
           - clear-halt          # lists latched halts; CLEAR-HALT clears them
+          - promote-ramp        # live size ramp eligibility; PROMOTE-RAMP promotes
           - wipe-void-shadow    # WIPE-VOID-SHADOW
           - shrink-tape         # measurement; SHRINK-TAPE shrinks (see max_chunks)
           - vacuum-full         # VACUUM-FULL-TAPE
@@ -43,7 +44,7 @@ on:
           - retire-deploy       # needs retire_sha; RETIRE-DEPLOY-SHA
           - legacy-positions    # CLOSE-LEGACY-POSITIONS
       confirm:
-        description: "The action's exact token (CLEAR-HALT, WIPE-VOID-SHADOW, SHRINK-TAPE, VACUUM-FULL-TAPE, PURGE-ORPHAN-MARKETS, RETIRE-DEPLOY-SHA, CLOSE-LEGACY-POSITIONS). Blank = dry run."
+        description: "The action's exact token (CLEAR-HALT, PROMOTE-RAMP, WIPE-VOID-SHADOW, SHRINK-TAPE, VACUUM-FULL-TAPE, PURGE-ORPHAN-MARKETS, RETIRE-DEPLOY-SHA, CLOSE-LEGACY-POSITIONS). Blank = dry run."
         required: false
         default: ""
       retire_sha:
@@ -88,6 +89,7 @@ jobs:
             pending-matches)   python -m src.maintenance --pending-matches ;;
             day7)              python -m src.execution.day7 ;;
             clear-halt)        python -m src.maintenance --clear-halt --confirm "$CONFIRM" ;;
+            promote-ramp)      python -m src.maintenance --promote-ramp --confirm "$CONFIRM" ;;
             wipe-void-shadow)  python -m src.maintenance --wipe-void-shadow --confirm "$CONFIRM" ;;
             shrink-tape)
               if [ -n "$MAX_CHUNKS" ]; then

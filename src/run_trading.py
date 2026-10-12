@@ -56,6 +56,7 @@ from src.trading.engine import TradeEngine, sync_live_bankroll
 from src.trading.settler import Settler
 from src.cycle_lock import cycle_lock
 from src.risk.halts import format_halts
+from src.risk.ramp import format_ramp
 from src.cycle_log import cycles_digest, format_cycles_digest, ping_deadman, record_cycle
 from src.trading.fee_schedule import BASE_TAKER_RATE, FeeBook, fetch_from_kalshi
 from src.trading.fee_schedule import sweep as sweep_fees
@@ -581,6 +582,7 @@ def _run_pipeline_locked(alerter: Alerter, cycle: int, settings: Settings, engin
                 # diagnosed, but Telegram is where it gets noticed.
                 # First line of the digest whenever a kill switch is latched.
                 _section("🛑 Halts", lambda: format_halts(engine)),
+                _section("📶 Ramp", lambda: format_ramp(engine)),
                 _section("🔻 Funnel", lambda: "🔻 " + funnel.headline()),
                 # A schedule that does not fire produces no error, so the only
                 # way to see a gap is to count what ran (2026-10-06, L32).

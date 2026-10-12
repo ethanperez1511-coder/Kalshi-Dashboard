@@ -100,6 +100,16 @@ class RiskManager:
                 rejection_reasons=limits_result.violations,
             )
 
+        # Live size ramp: the LAST step, after every limit has approved. A
+        # min(), so it can only lower the size (docs/size-ramp.md).
+        if settings.mode == "live":
+            from src.risk.ramp import current_stage, ramped_quantity
+
+            ramped = ramped_quantity(quantity, current_stage(self._engine))
+            if ramped < quantity:
+                quantity = ramped
+                dollars = quantity * contract_cost
+
         return TradeDecision(
             approved=True, side=side,
             position_size_dollars=round(dollars, 2),

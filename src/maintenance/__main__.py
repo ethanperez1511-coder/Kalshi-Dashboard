@@ -106,6 +106,10 @@ def main(argv=None) -> int:
         ),
     )
     parser.add_argument(
+        "--promote-ramp", action="store_true",
+        help="Show live size-ramp eligibility; promote one stage with --confirm PROMOTE-RAMP.",
+    )
+    parser.add_argument(
         "--clear-halt", action="store_true",
         help="List latched kill-switch halts; clear them with --confirm CLEAR-HALT.",
     )
@@ -141,6 +145,9 @@ def main(argv=None) -> int:
 
     if args.vacuum_full:
         return _vacuum_full(engine, args.confirm.strip())
+
+    if args.promote_ramp:
+        return _promote_ramp(engine, args.confirm.strip())
 
     if args.clear_halt:
         return _clear_halt(engine, args.confirm.strip())
@@ -274,6 +281,38 @@ def _vacuum_full(engine, token: str) -> int:
     )
     write_summary(headline, text[:4000], ok=True)
     return 0
+
+
+PROMOTE_RAMP_TOKEN = "PROMOTE-RAMP"
+
+
+def _promote_ramp(engine, token: str) -> int:
+    """Eligibility always; promotion only on the exact token AND every bar met."""
+    from src.risk.ramp import STAGE_CAPS, current_stage, eligibility, promote
+
+    if token and token != PROMOTE_RAMP_TOKEN:
+        logger.error("Confirmation token did not match. Expected %r, got %r. "
+                     "Nothing was changed.", PROMOTE_RAMP_TOKEN, token)
+        write_summary("Promote ramp: BAD CONFIRM TOKEN — nothing changed", ok=False)
+        return 2
+    stage = current_stage(engine)
+    ok, bars = eligibility(engine)
+    lines = [f"LIVE SIZE RAMP: stage {stage} (cap {STAGE_CAPS[stage]})"] + [
+        f"  {'✅' if passed else '❌'} {name}: {detail}" for name, passed, detail in bars
+    ]
+    code = 0
+    if token == PROMOTE_RAMP_TOKEN:
+        if promote(engine, by="operator:promote-ramp"):
+            lines.append(f"PROMOTED to stage {current_stage(engine)}")
+        else:
+            lines.append("REFUSED: not every bar is met")
+            code = 1
+    else:
+        lines.append("Dry run. To promote: --promote-ramp --confirm PROMOTE-RAMP")
+    text = "\n".join(lines)
+    print(text)
+    write_summary(lines[-1], text, ok=code == 0)
+    return code
 
 
 CLEAR_HALT_TOKEN = "CLEAR-HALT"

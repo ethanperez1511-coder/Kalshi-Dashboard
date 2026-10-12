@@ -70,6 +70,10 @@ def trip(engine: Engine, switch: str, detail: str,
         session.add(HaltEvent(switch=switch, detail=detail[:2000], tripped_at=now))
         session.commit()
     logger.error("HALT %s: %s", switch, detail)
+    # Any trip returns the live size ramp to 1 contract (docs/size-ramp.md).
+    from src.risk.ramp import demote_to_zero
+
+    demote_to_zero(engine, f"{switch}: {detail}", now=now)
     (alert or _send_alert)(
         f"🛑 <b>TRADING HALTED</b> ({switch}): {detail}\n"
         f"No new trades until cleared by hand: "

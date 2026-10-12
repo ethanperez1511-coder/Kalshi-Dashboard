@@ -23,6 +23,7 @@ from src.models.shadow import ShadowMakerOrder
 from src.models.fees import SeriesFee
 from src.models.cycle_run import CycleRun
 from src.models.halt import HaltEvent
+from src.models.ramp_event import RampEvent
 from src.backtest.models import BacktestRun, BacktestTrade
 
 __all__ = [
@@ -44,6 +45,7 @@ __all__ = [
     "SeriesFee",
     "CycleRun",
     "HaltEvent",
+    "RampEvent",
     "OrderbookGap",
     "ShadowMakerOrder",
     "WeatherCellFit",

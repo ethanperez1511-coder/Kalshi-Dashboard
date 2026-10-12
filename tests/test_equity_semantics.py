@@ -134,10 +134,27 @@ class TestPaperLiveAgreement:
         live = self._build(tmp_path, "live3", "live")
         ev = calculate_ev(p_model=0.60, price_cents=50, yes_bid=49, yes_ask=51)
 
+        # Equity semantics, compared with the live size ramp at its uncapped
+        # stage: the ramp is a deliberate live-only min() applied AFTER this
+        # sizing (docs/size-ramp.md), so parity is a statement about the
+        # sizing beneath it.
+        from src.database import get_session
+        from src.models.settings import TradingSettings
+
+        with get_session(live) as s:
+            s.query(TradingSettings).first().ramp_stage = 3
+            s.commit()
         dp = RiskManager(paper).evaluate(ev, 0.8, "NEW-MKT", "General")
         dl = RiskManager(live).evaluate(ev, 0.8, "NEW-MKT", "General")
         assert dp.position_size_dollars == dl.position_size_dollars
         assert dp.quantity == dl.quantity
+
+        # And at stage 0 the ramp only ever lowers what the same sizing approved.
+        with get_session(live) as s:
+            s.query(TradingSettings).first().ramp_stage = 0
+            s.commit()
+        ramped = RiskManager(live).evaluate(ev, 0.8, "NEW-MKT", "General")
+        assert ramped.quantity == 1 <= dp.quantity
 
 
 # --------------------------------------------------------------------------

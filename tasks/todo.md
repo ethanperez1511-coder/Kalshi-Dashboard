@@ -2127,3 +2127,20 @@ only the token clears it.
 - [ ] GATE REACHED 50 (per the repeated message). Live stays OFF. The size
       ramp (docs/size-ramp.md) is still design-only; approve, then build
       before any flip.
+
+## SIZE RAMP — BUILD (approved 2026-10-12; design docs/size-ramp.md)
+- [ ] src/risk/ramp.py: stage caps {0:1, 1:3, 2:10, 3:none} and minimum live
+      trades per stage {20, 20, 40}. Applied at the END of
+      RiskManager.evaluate, after every limit approved, as
+      quantity = min(quantity, cap), in LIVE mode only.
+- [ ] Bars: trades-in-stage minimum; slippage (mean ≤1c, max ≤2c); fees match
+      schedule; NO halt since the stage began; calibration within 2 SE;
+      ledger parity. Parity FAILS CLOSED (no Kalshi reconciler exists yet), so
+      promotion is impossible until one is built. That is deliberate.
+- [ ] Promotion: `--promote-ramp --confirm PROMOTE-RAMP`, refused unless every
+      bar holds. Demotion: any kill-switch trip sets stage 0.
+- [ ] State: TradingSettings.ramp_stage / ramp_stage_started_at; ramp_events
+      rows record who, why and when.
+- Safety: the ramp can only lower quantity (property test over stages ×
+  quantities). Limits, Kelly, mode and the live gate are untouched (pinned
+  test). Paper mode is inert. Nothing flips live.
