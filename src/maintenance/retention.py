@@ -67,9 +67,12 @@ SNAPSHOT_HOURLY_DAYS = 14
 SNAPSHOT_MAX_DAYS = 60
 
 # Orderbook tape (deltas, snapshots, trade prints): kept for this many days
-# measured back from NOW. It equals the compaction and replay window, so
-# nothing that replay or shadow reads is ever pruned.
-DELTA_RETENTION_DAYS = 14
+# measured back from NOW. Replay and shadow read the last two days (the
+# full-payload window), far inside it.
+DELTA_RETENTION_DAYS = 10
+# 14 until 2026-10-12, cut to 10 as a margin under Neon's cap while the tape is
+# almost all live (dry run: ~726 MB rebuilt of a 698 MB file, 186 MB headroom).
+# Restore 14 on the Oracle VM, where storage stops binding.
 
 # Rows per DELETE. A killed run leaves a smaller job behind, not a rolled-back
 # hour.

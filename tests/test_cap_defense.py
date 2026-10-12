@@ -18,7 +18,7 @@ import pytest
 
 import src.maintenance.retention as retention
 from src.database import Base, get_session
-from src.maintenance.retention import NEON_CAP_BYTES, defend_cap
+from src.maintenance.retention import DELTA_RETENTION_DAYS, NEON_CAP_BYTES, defend_cap
 from src.models.orderbook_raw import OrderbookDeltaRaw
 
 NOW = dt.datetime(2026, 10, 20, 12, tzinfo=dt.timezone.utc)
@@ -29,7 +29,7 @@ CAP = NEON_CAP_BYTES
 def engine(db_engine):
     Base.metadata.create_all(db_engine)
     with get_session(db_engine) as s:
-        for age in range(14):                      # one row per day, ages 0..13
+        for age in range(DELTA_RETENTION_DAYS):    # one row per day, a full window
             s.add(OrderbookDeltaRaw(
                 market_ticker="M", msg_type="delta", sid=1, seq=age, payload="{}",
                 received_at=NOW - dt.timedelta(days=age, hours=1),
@@ -58,21 +58,21 @@ def _sizes(monkeypatch, engine, file_fraction, live_per_row):
 
 
 def test_below_eighty_five_percent_nothing_happens(engine, monkeypatch):
-    _sizes(monkeypatch, engine, 0.84, live_per_row=0.07 * CAP)
+    _sizes(monkeypatch, engine, 0.84, live_per_row=0.09 * CAP)
     alerts = []
     assert defend_cap(engine, NOW, alerts.append) == []
-    assert len(_ages(engine)) == 14 and alerts == []
+    assert len(_ages(engine)) == DELTA_RETENTION_DAYS and alerts == []
 
 
 def test_it_cuts_the_oldest_day_first_and_alerts_each_step(engine, monkeypatch):
-    # 14 rows x 6% = 84% live. Cut to 12 days -> 72%: two steps.
-    _sizes(monkeypatch, engine, 0.90, live_per_row=0.06 * CAP)
+    # 10 rows x 8.5% = 85% live. Cut to 8 days -> 68%: two steps.
+    _sizes(monkeypatch, engine, 0.90, live_per_row=0.085 * CAP)
     alerts = []
 
     steps = defend_cap(engine, NOW, alerts.append)
 
     assert len(steps) == 2
-    assert _ages(engine) == list(range(12))       # ages 12 and 13 gone, oldest first
+    assert _ages(engine) == list(range(8))        # ages 8 and 9 gone, oldest first
     assert len(alerts) == 2 and all("tape window" in a for a in alerts)
 
 
@@ -92,5 +92,5 @@ def test_dead_pages_get_a_shrink_alert_not_a_deletion(engine, monkeypatch):
     alerts = []
 
     assert defend_cap(engine, NOW, alerts.append) == []
-    assert len(_ages(engine)) == 14
+    assert len(_ages(engine)) == DELTA_RETENTION_DAYS
     assert len(alerts) == 1 and "shrink_tape" in alerts[0]

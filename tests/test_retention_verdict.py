@@ -31,6 +31,13 @@ def test_a_healthy_run_at_81_percent_is_green(seeded, monkeypatch):
     assert _run_prune(seeded, monkeypatch, 807 * MB) == 0
 
 
+@pytest.mark.parametrize("pct", [0.75, 0.80, 0.84, 0.86, 0.89])
+def test_anywhere_below_the_fail_line_a_healthy_run_is_green(seeded, monkeypatch, pct):
+    """Between the warn line and the fail line the digest warns; the run does
+    not go red (ruling 2026-10-12, restated after the shrink-tape dry run)."""
+    assert _run_prune(seeded, monkeypatch, int(pct * NEON_CAP_BYTES)) == 0
+
+
 def test_at_the_fail_line_it_is_red(seeded, monkeypatch):
     assert _run_prune(seeded, monkeypatch, int(0.91 * NEON_CAP_BYTES)) == 1
 

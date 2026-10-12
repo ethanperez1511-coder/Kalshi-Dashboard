@@ -30,7 +30,9 @@ from src.models.orderbook_raw import OrderbookDeltaRaw
 NOW = dt.datetime(2026, 10, 12, 12, tzinfo=dt.timezone.utc)
 
 # The ruling. Restated, not imported: if the constant drifts, this should fail.
-RULED_DAYS = 14
+# 14 days from 2026-10-06; cut to 10 on 2026-10-12 as a margin under Neon's
+# cap until the Oracle VM (where storage stops binding) takes over.
+RULED_DAYS = 10
 
 
 @pytest.fixture
@@ -63,14 +65,14 @@ def _ages(engine, now):
 def test_the_anchored_wipe_does_not_take_the_replay_window(engine):
     """This is the day the anchored window closes. The first delta is 61 days
     old, so the anchored code deletes everything older than yesterday. The
-    fourteen days that replay and shadow read must survive it."""
+    window that replay and shadow read must survive it."""
     for age in range(61, -1, -1):
         _tape(engine, NOW - dt.timedelta(days=age))
 
     apply_retention(engine, now=NOW)
 
     ages = _ages(engine, NOW)
-    assert len(ages) == RULED_DAYS + 1, ages        # ages 0..14 inclusive
+    assert len(ages) == RULED_DAYS + 1, ages        # ages 0..RULED_DAYS inclusive
     assert max(ages) <= RULED_DAYS
 
 
