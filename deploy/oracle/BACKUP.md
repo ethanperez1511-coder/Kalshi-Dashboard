@@ -5,9 +5,12 @@ Free instance or terminate a whole account, and backups inside that account
 die with it. So there are two copies, in two places, and only one of them
 depends on Oracle.
 
+**Ruled 2026-10-12:** weekly, with a tested restore, plus a monthly copy to
+the Mac. The nightly Oracle-hosted copy is dropped: it died with the account
+in exactly the case that matters.
+
 | Copy | Where | Cadence | Retention | Survives account loss |
 |---|---|---|---|---|
-| A. Nightly dump | OCI Object Storage (20 GB free) | daily 03:30 UTC | 14 dumps | no |
 | B. Weekly dump | **Backblaze B2** (10 GB free tier), encrypted | Sunday 04:00 UTC | 8 weeks | **yes** |
 | C. Monthly | your Mac, pulled by you | monthly | as you like | yes |
 
@@ -36,18 +39,6 @@ restore drill checks against.
 brew install age
 age-keygen -o ~/.config/kalshi-backup.agekey     # prints the public key
 ```
-
-## Copy A: OCI Object Storage, no credentials on the VM
-1. Create a bucket `kalshi-dumps` (Object Storage, Standard tier).
-2. Create a **pre-authenticated request** on that bucket: write-only, expiry
-   12 months.
-3. The VM uploads with a plain HTTP PUT to that URL:
-   `curl -T kalshi-YYYYMMDD.dump.age "$OCI_PAR_URL/kalshi-YYYYMMDD.dump.age"`.
-   It holds no OCI API key, and the URL cannot list, read or delete.
-4. Add a lifecycle rule to delete objects after 15 days.
-
-Copy A is encrypted too. It costs nothing, and a dump is the whole trading
-record.
 
 ## Copy B: Backblaze B2, independent of Oracle
 1. Create a B2 bucket `kalshi-weekly`, **private**, with **Object Lock /
@@ -93,7 +84,9 @@ docker stop restore
 1. A new VM per SPEC §2.
 2. Phase B install.
 3. Copy the decrypted `kalshi.dump` up with `scp`, run `pg_restore` into the
-   local Postgres, then run `verify_restore` against it.
+   local Postgres, then run `verify_restore` against it. (Worst-case data loss
+   is one week of tape and paper record; Kalshi holds the true state of
+   every position.)
 4. Start the timers.
 
 Because it is paper trading, an outage pauses trading and nothing more. Kalshi
@@ -108,9 +101,9 @@ first cycle.
   backup.
 
 ## To build (Phase C, on this branch)
-- [ ] `deploy/oracle/backup.sh`: dump, write the manifest, age-encrypt, PUT to
-      the OCI PAR, and on Sundays also upload to B2. It fails loudly, and the
-      dead-man check gets a `/fail` ping.
+- [ ] `deploy/oracle/backup.sh`: dump, write the manifest, age-encrypt,
+      upload to B2, and keep the latest locally for the monthly pull. It fails
+      loudly, and the dead-man check gets a `/fail` ping.
 - [ ] `deploy/oracle/verify_restore.py`: compares the manifest with the
       restored database.
-- [ ] systemd timers `kalshi-backup-nightly`, `kalshi-backup-weekly`.
+- [ ] systemd timer `kalshi-backup-weekly`.

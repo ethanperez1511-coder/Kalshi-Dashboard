@@ -48,8 +48,10 @@ cron is local and exact, and storage and compute are not metered per use.
 - The recorder: a long-running websocket process.
 - Light dependencies (FastAPI, SQLAlchemy, httpx, psycopg); no numpy/pandas.
 
-**RULED: VM.Standard.A1.Flex, 2 OCPU / 12 GB first; 1 OCPU / 6 GB as the
-fallback** (§3).
+**RULED (2026-10-12): VM.Standard.A1.Flex 1 OCPU / 6 GB** (earlier 2/12 first;
+changed after AD-1/AD-2 had no capacity). At ~2–3 GB resident, memory use is
+~40–50% of 6 GB, which also keeps the memory criterion of idle reclamation
+safely above 20%.
 
 | Component | Expected resident memory |
 |---|---|
@@ -372,33 +374,28 @@ The cycle-count digest line and the dead-man ping work unchanged.
 
 ---
 
-## 7. Rulings still needed (one per line, with my recommendation)
+## 7. Rulings (all decided 2026-10-12)
 
-Already ruled: the shape and its fallback; 24/7 cycles; a 3-clean-day parallel
-run; the reclaim check on day 7 after cutover; PAYG exemption kept
-UNVERIFIED; an independent weekly backup.
-
-1. **Recorder window on the VM.** Recommend **24/7**: storage stops binding,
-   and every rest window a shadow order spans is then covered (no more
-   "unproven: not subscribed").
-2. **Storage budget on the VM.** Recommend **20 GB** of the 100 GB boot
-   volume. Keep the 14-day tape and 2-day payload rules; re-base the cap
-   defense on disk instead of Neon's 1 GB.
-3. **Telegram during the parallel run.** Recommend a **separate chat** (not
-   off), so the VM's alerts are visible but never confused with production.
-4. **Second admin path.** Recommend **OCI Bastion** (free, Oracle-managed, no
-   standing open port, uses your console login). Tailscale if the Bastion
-   plugin is unavailable on the Ubuntu image (verify at provisioning).
-5. **Independent backup target.** Recommend **Backblaze B2** with a
-   write-only key and **age** encryption (BACKUP.md), plus a monthly manual
-   copy to your Mac.
-6. **Pay As You Go.** Recommend **not now**; revisit only if capacity or the
-   day-7 metrics force it.
-7. **Deploy policy.** Recommend **human-triggered `kalshi-deploy <sha>` over
-   SSH**: the full test suite runs on the VM and must pass before services
-   restart. No auto-pull and no GitHub credential on the VM.
-8. **Neon after cutover.** Recommend keeping it **untouched for 14 days** (the
-   rollback window), then deleting the project.
-9. **GitHub workflows after cutover.** Recommend **disabling schedules at
-   cutover**, then deleting the workflow files in their own commit after the
-   14-day window.
+1. Shape: VM.Standard.A1.Flex **1 OCPU / 6 GB** primary.
+2. Availability domains: try AD-1, AD-2 **and AD-3**.
+3. Scripted retry: **yes**, as a restricted OCI user that can only create
+   instances, with its API key only on the operator's Mac and never in GitHub
+   (`retry/RETRY.md`).
+4. If there is no VM by **2026-10-26**: go hybrid (micro VM for the pipeline,
+   Postgres stays on Neon) rather than waiting longer.
+5. Cycles on the VM: every 15 minutes, 24/7.
+6. Recorder on the VM: **24/7**.
+7. Storage on the VM: a **20 GB** budget with the same 75 / 85 / 90% lines.
+8. Parallel run: **3 clean days** (Phase D definition).
+9. Telegram during the parallel run: a **separate chat**.
+10. Second admin path: **OCI Bastion**; Tailscale if Bastion is unavailable
+    on the Ubuntu image.
+11. Backups: **weekly** encrypted dump to Backblaze B2, a **tested restore**,
+    and a **monthly** copy to the operator's Mac (BACKUP.md).
+12. Deploys: human-run `kalshi-deploy <sha>`, with the full test suite passing
+    on the VM first.
+13. Neon: untouched for 14 days after cutover, then deleted.
+14. GitHub workflows: schedules disabled at cutover, files deleted after 14
+    days.
+15. Pay As You Go: **not now**; the reclaim exemption stays UNVERIFIED.
+16. Reclaim metrics check: day 7 after cutover.

@@ -72,7 +72,7 @@ the same as today. Dry runs need no token, as before.
   next run.
 - Contents: `KALSHI_API_KEY`, `KALSHI_PRIVATE_KEY`, `TELEGRAM_TOKEN`,
   `TELEGRAM_CHAT_ID`, `ODDS_API_KEY`, `DEADMAN_PING_URL`, `DATABASE_URL`
-  (local socket), `B2_KEY_ID`, `B2_APP_KEY`, `OCI_PAR_URL`, `AGE_RECIPIENT`
+  (local socket), `B2_KEY_ID`, `B2_APP_KEY`, `AGE_RECIPIENT`
   (a public key).
 - Never in the repo, never in a chat, never in shell history: type values in
   the editor.
@@ -115,8 +115,7 @@ Work down this list:
      position from Kalshi.
    - **Running but dead** → **Reboot** (Actions menu).
    - **Gone (reclaimed or terminated)** → rebuild per BACKUP.md "Rebuilding
-     production from a dump": new VM, then a restore from copy A (or copy B
-     if the account itself is gone).
+     production from a dump": new VM, then a restore from copy B.
 3. **Can't get a new VM** (no capacity): paper trading simply pauses; nothing
    is at risk. Within the 14-day rollback window, re-enable the GitHub
    schedules (Neon is intact). After it, restore copy B into a fresh Neon
