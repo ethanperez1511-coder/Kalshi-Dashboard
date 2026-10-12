@@ -25,21 +25,42 @@ from src.alerts import Alerter
 from src.run_summary import write_summary
 
 
+LIVE_CHECKS_FAILED = (
+    "🚨 <b>LIVE CHECKS FAILED</b>\n"
+    "An upstream contract may have changed under us — settlement station, "
+    "MOS availability, or contract terms.\n"
+    "Weather pricing should be treated as suspect until this is read."
+)
+
+
+def alert_text(env) -> str:
+    """The page for this failure. Explicit text wins. Live-checks says
+    "contract changed" ONLY when its tests ran and failed (pytest exit 1);
+    any other exit means the suite never ran and nothing was verified. Every
+    other workflow is named, never passed off as live-checks (2026-10-12)."""
+    if env.get("ALERT_TEXT"):
+        return env["ALERT_TEXT"]
+    if env.get("ALERT_KIND") == "live-checks":
+        code = env.get("LIVE_EXIT", "")
+        if code == "1":
+            return LIVE_CHECKS_FAILED
+        return (
+            f"🚨 <b>LIVE CHECKS COULD NOT RUN</b> (pytest exit {code or 'n/a'}): the "
+            f"suite did not execute, so weather pricing is NOT verified today. "
+            f"Usually a collection or install error; read the run."
+        )
+    workflow = env.get("GITHUB_WORKFLOW", "a workflow")
+    return f"🚨 <b>{workflow.upper()} FAILED</b>: read the run."
+
+
 def main() -> int:
     run_url = os.environ.get("RUN_URL", "(no run url)")
-    # Other workflows reuse this step. Each names its own failure, so a dead
-    # session never pages as "LIVE CHECKS FAILED".
-    body = os.environ.get("ALERT_TEXT") or (
-        "🚨 <b>LIVE CHECKS FAILED</b>\n"
-        "An upstream contract may have changed under us — settlement station, "
-        "MOS availability, or contract terms.\n"
-        "Weather pricing should be treated as suspect until this is read."
-    )
+    body = alert_text(os.environ)
     alerter = Alerter()
     delivered = alerter.send(f"{body}\n{run_url}")
 
     if delivered:
-        write_summary(f"Live-checks failure alert delivered to Telegram\n\n{run_url}")
+        write_summary(f"Failure alert delivered to Telegram\n\n{run_url}")
         # The original failure stands on its own: this step runs only under
         # `if: failure()`, so the job is already red and nothing is masked.
         return 0
@@ -48,12 +69,12 @@ def main() -> int:
     # a red step is what makes "alerted" distinguishable from "alerted nobody"
     # on the Actions page months later.
     text = (
-        "LIVE CHECKS FAILED and the Telegram alert did NOT go out — Telegram "
+        "A FAILURE ALERT did NOT go out — Telegram "
         "refused the message, or TELEGRAM_TOKEN / TELEGRAM_CHAT_ID are not set "
         "on this workflow. Read this run: nothing reached a phone.\n\n"
         f"{run_url}"
     )
-    write_summary("Live-checks alert NOT delivered", text, ok=False)
+    write_summary("Failure alert NOT delivered", text, ok=False)
     print(text, file=sys.stderr)
     return 1
 
