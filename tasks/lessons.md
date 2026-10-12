@@ -645,3 +645,31 @@ old one in a separate change, after the evidence.
 whether a cron fired fails silently whenever crons do. The dead-session alert
 needs a trigger outside GitHub's scheduler (an external caller of
 workflow_dispatch), or it is decoration.
+
+## L33 — A test-only import can silence production monitoring. Declare it, and check the declarations.
+
+`tests/test_maintenance_workflow.py` imported `yaml`, which was not declared.
+Locally it was installed, so nothing failed. The scheduled live-checks runner
+installs only what pyproject.toml declares, so pytest died at COLLECTION (exit
+code 2) and the live suite never executed for three days. The page it sent
+claimed a contract change, the opposite of the truth. Rules:
+- every third-party import is declared (now enforced by a test that runs in
+  the scheduled job);
+- an alert names the job that failed and what the failure means (exit 1 vs
+  "could not run").
+
+## L34 — Changing a model's nullability is a schema change. "Additive-only" migrators miss it.
+
+`payload` went from NOT NULL to nullable in the model; the migrator only added
+columns, so production kept NOT NULL and every compaction failed for seven
+weeks. Any change to a column's type, length or nullability needs a check
+that the live schema followed. Lossless relaxations (widen, drop NOT NULL) now
+migrate automatically, and anything else must be a stated, manual step.
+
+## L35 — "Non-fatal" is a decision about severity, not about visibility.
+
+The compaction failure was caught, logged as a warning and printed as one
+line, so it failed every day from August to October without turning anything
+red. Once a step carries load (the 2-day payload rule), its failure is red.
+Before writing `except Exception: logger.warning(...)`, ask whether anyone
+would act on this; if so, it must reach a red run or an alert.

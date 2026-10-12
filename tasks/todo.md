@@ -2114,3 +2114,16 @@ only the token clears it.
 - [x] 9b: kill switches (5c24fc6). 22 tests; 1275 total.
 - [x] 9c: size ramp DESIGN in docs/size-ramp.md, awaiting approval before
       build. Must land before gate 50 (currently 38).
+
+## 2026-10-12 incident fixes
+- [x] Retention paged the live-checks text: alert names its workflow (a373bb6).
+- [x] Live-checks never ran 10-10/11 (undeclared yaml, exit 2): declared,
+      guarded (5111daf). Both live checks PASS when run today.
+- [x] Compaction never ran (NOT NULL left on payload): migrator relaxes
+      (aeecba3); range UPDATE + VACUUM per batch + 200k/run cap; failed steps
+      go red; thresholds 75/85/90 of the cap (16b8231).
+- [x] Milestones once (8adc7b6); recorder status session-aware (bf83791);
+      fee sweep of all 19 series and missed-slot names (ba3e6cb).
+- [ ] GATE REACHED 50 (per the repeated message). Live stays OFF. The size
+      ramp (docs/size-ramp.md) is still design-only; approve, then build
+      before any flip.
