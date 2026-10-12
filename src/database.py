@@ -129,11 +129,30 @@ def pending_schema_changes(engine: Engine) -> List[str]:
         for column in table.columns:
             if column.name not in live:
                 pending.append(f"{table.name}.{column.name}")
-            elif engine.dialect.name == "postgresql" and _widening(
-                engine, table.name, column, live[column.name]
-            ):
-                pending.append(f"{table.name}.{column.name} (widen)")
+            elif engine.dialect.name == "postgresql":
+                if _widening(engine, table.name, column, live[column.name]):
+                    pending.append(f"{table.name}.{column.name} (widen)")
+                if _relaxing(column, live[column.name]):
+                    pending.append(f"{table.name}.{column.name} (relax NOT NULL)")
     return pending
+
+
+def _relaxing(column: Column, existing: dict):
+    """DDL to drop NOT NULL where the model now allows NULL, else None.
+
+    Lossless, like widening: every existing row already satisfies the looser
+    rule. Never the reverse (adding NOT NULL could fail or need a backfill),
+    and never on a primary key.
+
+    orderbook_delta_raw.payload was created NOT NULL (2026-08-11) and made
+    nullable in the model for tape compaction (08-24). Without this, every
+    compaction failed with an IntegrityError for seven weeks.
+    """
+    if column.primary_key or not column.nullable:
+        return None
+    if existing.get("nullable", True):
+        return None
+    return f"ALTER COLUMN {column.name} DROP NOT NULL"
 
 
 def _widening(engine: Engine, table_name: str, column: Column, existing: dict):
@@ -166,7 +185,9 @@ def ensure_schema(engine: Engine) -> List[str]:
     134k-row SQLite file or to Neon. This walks the model metadata and issues
     `ALTER TABLE ... ADD COLUMN` for anything missing.
 
-    Guarantees: never drops, never retypes, never rewrites a row. Idempotent.
+    Guarantees: never drops a column, never narrows a type, never adds a
+    constraint, never rewrites a row. It only adds columns, widens types and
+    drops NOT NULL where the model allows NULL (all lossless). Idempotent.
     Returns the list of columns added, so a caller can log what changed.
 
     This WRITES. It must only ever run when someone asked for it — see
@@ -210,15 +231,20 @@ def ensure_schema(engine: Engine) -> List[str]:
                 if column.name not in live:
                     continue
                 clause = _widening(engine, table.name, column, live[column.name])
-                if clause is None:
-                    continue
-                with engine.begin() as conn:
-                    conn.execute(text(f"ALTER TABLE {table.name} {clause}"))
-                added.append(f"{table.name}.{column.name} (widened)")
-                logger.info(
-                    "Schema migration: widened %s.%s -> %s",
-                    table.name, column.name, column.type,
-                )
+                if clause is not None:
+                    with engine.begin() as conn:
+                        conn.execute(text(f"ALTER TABLE {table.name} {clause}"))
+                    added.append(f"{table.name}.{column.name} (widened)")
+                    logger.info(
+                        "Schema migration: widened %s.%s -> %s",
+                        table.name, column.name, column.type,
+                    )
+                relax = _relaxing(column, live[column.name])
+                if relax is not None:
+                    with engine.begin() as conn:
+                        conn.execute(text(f"ALTER TABLE {table.name} {relax}"))
+                    added.append(f"{table.name}.{column.name} (NOT NULL dropped)")
+                    logger.info("Schema migration: %s.%s now nullable", table.name, column.name)
 
     return added
 
