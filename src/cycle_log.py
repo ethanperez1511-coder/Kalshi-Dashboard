@@ -67,7 +67,17 @@ def cycles_digest(engine: Engine, now: Optional[dt.datetime] = None) -> Dict[str
             .where(CycleRun.started_at >= since)
             .group_by(CycleRun.source, CycleRun.ok)
         ).all()
-    out = {"session": 0, "backstop": 0, "failed": 0}
+    out = {"session": 0, "backstop": 0, "failed": 0, "missed": []}
+    with get_session(engine) as session:
+        starts = [
+            t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)
+            for (t,) in session.execute(
+                select(CycleRun.started_at)
+                .where(CycleRun.started_at >= since, CycleRun.source == SESSION_SOURCE,
+                       CycleRun.ok.is_(True))
+            ).all()
+        ]
+    out["missed"] = _missed_slots(starts, now)
     for source, ok, count in rows:
         if not ok:
             out["failed"] += count
@@ -78,6 +88,21 @@ def cycles_digest(engine: Engine, now: Optional[dt.datetime] = None) -> Dict[str
     return out
 
 
+def _missed_slots(starts, now: dt.datetime):
+    """Slots of the most recent COMPLETED session window with no session cycle
+    starting inside them. A cycle starts within a minute or two of its slot."""
+    close_today = dt.datetime.combine(now.date(), SESSION_END, tzinfo=dt.timezone.utc)
+    close = close_today if now >= close_today else close_today - dt.timedelta(days=1)
+    open_ = dt.datetime.combine(close.date(), SESSION_START, tzinfo=dt.timezone.utc)
+    missed = []
+    slot = open_
+    while slot < close:
+        if not any(slot <= t < slot + dt.timedelta(seconds=CYCLE_SECONDS) for t in starts):
+            missed.append(slot.strftime("%H:%M"))
+        slot += dt.timedelta(seconds=CYCLE_SECONDS)
+    return missed
+
+
 def format_cycles_digest(data: Dict[str, int]) -> str:
     gap = data["session"] < SESSION_EXPECTED
     line = (
@@ -86,6 +111,8 @@ def format_cycles_digest(data: Dict[str, int]) -> str:
     )
     if data["failed"]:
         line += f", {data['failed']} failed"
-    if gap:
+    if gap and data.get("missed"):
+        line += " — missed " + ", ".join(data["missed"])
+    elif gap:
         line += " — the session missed cycles; check market-session runs"
     return line

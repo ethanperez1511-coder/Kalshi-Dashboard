@@ -28,6 +28,7 @@ from src.trading_config import (
     MAKER_REST_SECONDS,
     SCORE_BUDGET_SECONDS,
     SHADOW_MAKER_ENABLED,
+    ingest_series_list,
 )
 from src.ingestion.series_ingest import coverage_from_db
 from src.weather.archive import run_daily_archive
@@ -56,7 +57,8 @@ from src.trading.settler import Settler
 from src.cycle_lock import cycle_lock
 from src.risk.halts import format_halts
 from src.cycle_log import cycles_digest, format_cycles_digest, ping_deadman, record_cycle
-from src.trading.fee_schedule import BASE_TAKER_RATE, fee_digest, format_fee_digest
+from src.trading.fee_schedule import BASE_TAKER_RATE, FeeBook, fetch_from_kalshi
+from src.trading.fee_schedule import sweep as sweep_fees
 
 logging.basicConfig(
     level=logging.INFO,
@@ -597,7 +599,13 @@ def _run_pipeline_locked(alerter: Alerter, cycle: int, settings: Settings, engin
                 _section("⚙️ Maker", describe_maker),
                 # Every series running on a cached or refused fee schedule is
                 # named here (ruling 2026-10-06 D); refusals also alert at once.
-                _section("💸 Fees", lambda: format_fee_digest(fee_digest(engine))),
+                # Every traded series, once a day: a fee change on a series
+                # that has not traded lately is still caught.
+                _section("💸 Fees", lambda: sweep_fees(
+                    FeeBook(engine, fetch=fetch_from_kalshi(settings.KALSHI_BASE_URL),
+                            alert=alerter.send),
+                    ingest_series_list(), engine,
+                )),
                 # A level is not a warning: 376 MB is fine on a database that
                 # has been 370 MB for a month and an emergency on one that was
                 # 200 MB on Friday. The rate is what would have shown the
@@ -696,11 +704,13 @@ def _run_pipeline_locked(alerter: Alerter, cycle: int, settings: Settings, engin
     logger.info(f"Bankroll: ${summary['bankroll']:.2f}")
 
     # Milestone alerts
-    paper_count = ts.paper_trade_count
-    if paper_count in (10, 25, 40, 50) or paper_count % 10 == 0:
-        alerter.milestone(paper_count, ts.paper_trades_before_live)
-    if paper_count >= ts.paper_trades_before_live:
-        alerter.live_gate_reached()
+    # Once each, and the gate once ever: these repeated every cycle before.
+    try:
+        from src.milestones import announce_milestones
+
+        announce_milestones(engine, alerter, ts.paper_trade_count, ts.paper_trades_before_live)
+    except Exception:
+        logger.warning("Milestone announcement failed (non-fatal)", exc_info=True)
     logger.info(f"Open positions: {summary['open_position_count']}")
     logger.info(f"Total exposure: ${summary['total_exposure']:.2f}")
     logger.info(f"Unrealized PnL: ${summary['unrealized_pnl']:.2f}")

@@ -147,3 +147,21 @@ def test_the_standard_schedule_charges_exactly_what_kalshi_fee_charges():
     for qty in (1, 3, 7, 25, 100):
         for price in range(0, 101):
             assert s.fee(qty, price) == kalshi_fee(qty, price), (qty, price)
+
+
+class TestDailySweep:
+    """The book used to fetch a series only when a trade reached execution, so
+    "10 series live" meant "10 series traded since the deploy", not "10 of 19
+    watched". The digest now checks every traded series once a day and names
+    any it could not vouch for."""
+
+    def test_the_sweep_checks_every_series_and_names_the_missing(self, engine):
+        from src.trading.fee_schedule import sweep
+
+        answers = {"KXHIGHNY": ("quadratic", 1), "KXHIGHCHI": ("quadratic", 1),
+                   "KXHIGHTSEA": RuntimeError("timeout")}
+        book, alerts = _book(engine, answers)
+        line = sweep(book, list(answers), engine, now=NOW)
+
+        assert "2/3 series live" in line
+        assert "KXHIGHTSEA" in line and "no schedule" in line

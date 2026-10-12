@@ -189,3 +189,22 @@ def format_fee_digest(data: Dict[str, List]) -> str:
     if data["stale"]:
         line += " · REFUSED (>24h): " + ", ".join(f"{s} ({h:.0f}h)" for s, h in sorted(data["stale"]))
     return line
+
+
+def sweep(book: "FeeBook", series_list: List[str], engine: Engine,
+          now: Optional[dt.datetime] = None) -> str:
+    """Check every traded series once (the daily digest), so a fee change on a
+    series that has not traded lately is still caught. Returns the digest line."""
+    refused = []
+    for series in series_list:
+        schedule, refusal = book.schedule(series)
+        if refusal:
+            refused.append(series)
+    data = fee_digest(engine, now=now)
+    watched = [s for s in series_list if s in set(data["live"])]
+    line = f"💸 Fees: {len(watched)}/{len(series_list)} series live from Kalshi"
+    if data["cached"]:
+        line += " · CACHED: " + ", ".join(f"{s} ({h:.0f}h)" for s, h in sorted(data["cached"]))
+    if refused:
+        line += " · no schedule (refused): " + ", ".join(sorted(refused))
+    return line

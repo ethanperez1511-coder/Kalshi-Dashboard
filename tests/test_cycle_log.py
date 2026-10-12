@@ -118,3 +118,25 @@ class TestWiring:
         pings, records = self._run(monkeypatch, engine, lambda *a: None, held=False)
         rt.run_pipeline()
         assert records == [] and pings == []
+
+
+class TestMissedSlots:
+    """'session 20/24' says four cycles are missing, not which. On 2026-10-11
+    the session started at 15:33 (kicked by the backstop), which explains
+    three; the digest now names every missed slot so the fourth is visible."""
+
+    def test_the_digest_names_the_missed_slots(self, engine):
+        day = dt.date(2026, 10, 11)
+        ran = [dt.time(h, m) for h in range(15, 21) for m in (0, 15, 30, 45)]
+        skip = {dt.time(15, 0), dt.time(15, 15), dt.time(15, 30), dt.time(18, 45)}
+        for t in ran:
+            if t in skip:
+                continue
+            start = dt.datetime.combine(day, t, tzinfo=dt.timezone.utc) + dt.timedelta(seconds=40)
+            record_cycle(engine, start, start, True, "market-session")
+        now = dt.datetime(2026, 10, 12, 2, 30, tzinfo=dt.timezone.utc)
+
+        line = format_cycles_digest(cycles_digest(engine, now=now))
+
+        assert "session 20/24" in line
+        assert "missed 15:00, 15:15, 15:30, 18:45" in line
