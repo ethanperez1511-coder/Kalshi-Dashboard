@@ -31,6 +31,9 @@ class TradingSettings(Base):
     # Liveness signal — last time a daily "still alive" heartbeat was sent.
     # Nullable, non-risk field: never gates trading, only reassurance alerts.
     last_heartbeat_at: Mapped[Optional[datetime]] = mapped_column(DateTime, default=None)
+    # Highest paper-trade milestone already announced (the gate counts as
+    # one). Announcement only; it gates nothing.
+    last_milestone_alerted: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
 
     @classmethod
     def get_or_create(cls, engine: Engine) -> TradingSettings:
