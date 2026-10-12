@@ -70,6 +70,9 @@ def _run_as_module(monkeypatch, delivered: bool) -> int:
 
 class TestDeliveredAlert:
     def test_returns_zero_and_sends_one_message(self, monkeypatch, summary_path):
+        # As live-checks.yml invokes it when a check RAN and failed (exit 1).
+        monkeypatch.setenv("ALERT_KIND", "live-checks")
+        monkeypatch.setenv("LIVE_EXIT", "1")
         code = _run_as_module(monkeypatch, delivered=True)
 
         assert code == 0
