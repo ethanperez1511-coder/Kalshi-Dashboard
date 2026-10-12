@@ -28,6 +28,11 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install ".[dev]"
+      # Collection-level guard first. On 2026-10-10/11 an undeclared import
+      # (yaml) broke collection with exit code 2, so the live suite never ran
+      # and the page claimed a contract change. This names the cause instead.
+      - name: Every import is a declared dependency
+        run: python -m pytest tests/test_declared_dependencies.py -m "not live" -q
       - name: Run live suite
         id: live
         env:
@@ -35,7 +40,14 @@ jobs:
           # lives in the DB and defaults to paper.
           KALSHI_API_KEY: ${{ secrets.KALSHI_API_KEY }}
           KALSHI_PRIVATE_KEY: ${{ secrets.KALSHI_PRIVATE_KEY_B64 }}
-        run: python -m pytest -m live -v
+        # The exit code decides the page: 1 = a check failed (contract
+        # warning); anything else = the suite never ran (nothing verified).
+        run: |
+          set +e
+          python -m pytest -m live -v
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit $code
 
       # A scheduled guard that fails quietly in Actions is the same bug as a
       # test that skips itself: something is watching, nothing is watched. The
@@ -46,4 +58,6 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ALERT_KIND: live-checks
+          LIVE_EXIT: ${{ steps.live.outputs.code }}
         run: python -m src.alert_live_failure
