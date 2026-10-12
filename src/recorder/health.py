@@ -261,6 +261,41 @@ def format_recorder_health(data: Dict[str, Any]) -> str:
         )
 
     stale = data.get("hours_since_last_message")
-    if stale is not None and stale > 2:
-        lines.append(f"   ⚠️ nothing recorded for {stale:.1f}h — recorder may be down")
+    if stale is not None:
+        now = dt.datetime.now(dt.timezone.utc)
+        status = recording_status(now - dt.timedelta(hours=stale), now=now)
+        if status:
+            lines.append(f"   {status}")
     return "\n".join(lines)
+
+
+# Tolerances. Mid-session, the recorder flushes in batches and restarts hourly.
+_SESSION_SILENCE = dt.timedelta(minutes=30)
+# A session whose last message is this far before its close stopped early.
+_EARLY_STOP = dt.timedelta(minutes=45)
+
+
+def recording_status(last: dt.datetime, now: dt.datetime) -> str:
+    """'' when silence is expected, ℹ️ outside the session, ⚠️ when the
+    recorder is silent during a session or stopped well before the last one
+    closed. Session hours come from src.session, so the two cannot drift."""
+    from src.session import SESSION_END, SESSION_START
+
+    def _at(day, t):
+        return dt.datetime.combine(day, t, tzinfo=dt.timezone.utc)
+
+    open_, close = _at(now.date(), SESSION_START), _at(now.date(), SESSION_END)
+    if open_ + _SESSION_SILENCE <= now < close:
+        silent = now - last
+        if silent > _SESSION_SILENCE:
+            return (f"⚠️ nothing recorded for {silent.total_seconds() / 3600:.1f}h "
+                    f"during the session — recorder may be down")
+        return ""
+    if open_ <= now < close:
+        return ""                                     # session just opened
+    last_close = close if now >= close else close - dt.timedelta(days=1)
+    if last < last_close - _EARLY_STOP:
+        return (f"⚠️ the last session's recording stopped at {last:%H:%M}Z, "
+                f"before its {last_close:%H:%M}Z close")
+    return (f"ℹ️ idle outside the session (last message {last:%H:%M}Z); "
+            f"recording resumes at {SESSION_START:%H:%M}Z")
