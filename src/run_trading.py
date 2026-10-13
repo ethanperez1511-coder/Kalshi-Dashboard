@@ -668,8 +668,6 @@ def _run_pipeline_locked(alerter: Alerter, cycle: int, settings: Settings, engin
         trip(engine, "switch_error", "kill-switch evaluation raised; see logs",
              alert=alerter.send)
 
-    from src.trading.fee_schedule import FeeBook, fetch_from_kalshi
-
     fee_book = FeeBook(
         engine, fetch=fetch_from_kalshi(settings.KALSHI_BASE_URL), alert=alerter.send,
     )
