@@ -111,11 +111,12 @@ def test_batches_never_exceed_twenty_thousand_rows():
     assert tape.BATCH <= 20_000
 
 
-def test_it_stops_at_ninety_percent_of_the_cap(engine, monkeypatch):
+def test_it_stops_at_ninety_five_percent_of_the_cap(engine, monkeypatch):
+    """0.90 until 2026-10-13, when it blocked the step that frees space."""
     from src.maintenance.retention import NEON_CAP_BYTES
 
     monkeypatch.setattr(tape, "BATCH", 2)
-    monkeypatch.setattr(tape, "database_size_bytes", lambda e: int(0.91 * NEON_CAP_BYTES))
+    monkeypatch.setattr(tape, "database_size_bytes", lambda e: int(0.96 * NEON_CAP_BYTES))
     _rows(engine, "delta", hours_ago=72, n=6)
 
     result = _compact(engine)

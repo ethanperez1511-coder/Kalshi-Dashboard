@@ -55,10 +55,17 @@ MB = 1_000_000
 # Taken as DECIMAL GB, the smaller reading: the console counts in decimal
 # units, and if the cap is in fact 1 GiB this only errs early.
 NEON_CAP_BYTES = 1000 * MB
+# Judged on EFFECTIVE use: live data, i.e. the file minus the space inside it
+# that new writes reuse before the file grows (2026-10-13: a 903 MB file held
+# 206 MB reusable). Without a live measurement, effective use is the file.
 CAP_WARN_FRACTION = 0.75
-# Past here the next few days of growth can deadlock cleanup.
 CAP_ALARM_FRACTION = 0.85
 CAP_FAIL_FRACTION = 0.90
+# The physical file still binds: Neon refuses a write that must EXTEND it past
+# the cap. These lines on the file mean the reusable space is nearly gone.
+FILE_WARN_FRACTION = 0.90
+FILE_ALARM_FRACTION = 0.95
+FILE_HARD_FRACTION = 0.97
 
 # Price snapshots: full resolution recently, then one per market per hour, then
 # one per market per day, then gone.
@@ -104,16 +111,27 @@ class RetentionPlan:
         return self.size_bytes / NEON_CAP_BYTES
 
     @property
+    def effective_bytes(self) -> int:
+        return self.live_bytes if self.live_bytes is not None else self.size_bytes
+
+    @property
+    def effective_fraction(self) -> float:
+        return self.effective_bytes / NEON_CAP_BYTES
+
+    @property
     def cap_warn(self) -> bool:
-        return self.cap_fraction >= CAP_WARN_FRACTION
+        return (self.effective_fraction >= CAP_WARN_FRACTION
+                or self.cap_fraction >= FILE_WARN_FRACTION)
 
     @property
     def cap_alarm(self) -> bool:
-        return self.cap_fraction >= CAP_ALARM_FRACTION
+        return (self.effective_fraction >= CAP_ALARM_FRACTION
+                or self.cap_fraction >= FILE_ALARM_FRACTION)
 
     @property
     def cap_fail(self) -> bool:
-        return self.cap_fraction >= CAP_FAIL_FRACTION
+        return (self.effective_fraction >= CAP_FAIL_FRACTION
+                or self.cap_fraction >= FILE_HARD_FRACTION)
 
     @property
     def total_deletions(self) -> int:
@@ -245,19 +263,24 @@ def prune_tape(engine: Engine, now: dt.datetime, days: int = DELTA_RETENTION_DAY
 def defend_cap(engine: Engine, now: dt.datetime, alert) -> List[str]:
     """Give up the oldest tape, one day at a time, when the cap is close.
 
-    Triggered by the FILE (what Neon counts), from CAP_DEFENSE_TRIGGER of the
-    cap. A day is cut only while LIVE data is at or above CAP_DEFENSE_TARGET:
+    Triggered when live data reaches CAP_DEFENSE_TRIGGER of the cap, or the
+    file reaches FILE_ALARM_FRACTION. A day is cut only while LIVE data is at
+    or above CAP_DEFENSE_TARGET:
     deleting rows does not shrink the file, so cutting tape out of a file that
     is high because of dead pages loses data and gains nothing. That case gets
     an alert to dispatch shrink_tape. Every step alerts; the floor alerts.
     """
     size = database_size_bytes(engine)
-    if size < CAP_DEFENSE_TRIGGER * NEON_CAP_BYTES:
-        return []
 
     def live() -> int:
         value = live_bytes_estimate(engine)
         return size if value is None else value
+
+    # Triggered by real use (live data) at the alarm line, or by the file
+    # itself nearing the point where it must extend past the cap.
+    if (live() < CAP_DEFENSE_TRIGGER * NEON_CAP_BYTES
+            and size < FILE_ALARM_FRACTION * NEON_CAP_BYTES):
+        return []
 
     if live() < CAP_DEFENSE_TARGET * NEON_CAP_BYTES:
         alert(
@@ -356,17 +379,22 @@ def apply_retention(engine: Engine, now: Optional[dt.datetime] = None) -> Retent
 
 
 def size_status(size_bytes: int, live_bytes: Optional[int] = None) -> str:
-    """The file against the cap, and live data alongside it when measured."""
+    """The file against the cap, live data beside it, and the real headroom
+    (cap minus live: what new data can still occupy before Neon refuses)."""
     line = (
         f"{size_bytes / MB:.0f} MB file ({size_bytes / NEON_CAP_BYTES:.0%} of "
-        f"{NEON_CAP_BYTES / MB:.0f} MB Neon cap; warn {CAP_WARN_FRACTION:.0%}, "
-        f"fail {CAP_FAIL_FRACTION:.0%})"
+        f"{NEON_CAP_BYTES / MB:.0f} MB Neon cap)"
     )
+    effective = live_bytes if live_bytes is not None else size_bytes
     if live_bytes is not None:
         line += (
             f" · ~{live_bytes / MB:.0f} MB live · "
             f"{max(size_bytes - live_bytes, 0) / MB:.0f} MB reusable"
         )
+    line += (
+        f" · headroom ~{max(NEON_CAP_BYTES - effective, 0) / MB:.0f} MB "
+        f"(fail at {CAP_FAIL_FRACTION:.0%} live / {FILE_HARD_FRACTION:.0%} file)"
+    )
     return line
 
 
@@ -382,11 +410,15 @@ def format_plan(plan: RetentionPlan, applied: bool = False) -> str:
         lines.append(f"  {note}")
     if plan.cap_alarm:
         lines.append(
-            f"  🚨 at {plan.cap_fraction:.0%} of the Neon cap — at 100% Neon "
-            f"refuses writes AND deletes, and retention cannot run"
+            f"  🚨 {plan.effective_fraction:.0%} of the Neon cap in use (file "
+            f"{plan.cap_fraction:.0%}) — at 100% Neon refuses writes AND deletes, "
+            f"and retention cannot run"
         )
     elif plan.cap_warn:
-        lines.append(f"  ⚠️ file at {plan.cap_fraction:.0%} of the Neon cap (warn line)")
+        lines.append(
+            f"  ⚠️ {plan.effective_fraction:.0%} of the Neon cap in use (file "
+            f"{plan.cap_fraction:.0%}): warn line"
+        )
     return "\n".join(lines)
 
 

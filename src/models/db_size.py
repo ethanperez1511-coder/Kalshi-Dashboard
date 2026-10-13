@@ -21,6 +21,9 @@ class DbSizeSample(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     sampled_on: Mapped[date] = mapped_column(Date, unique=True, index=True)
     size_bytes: Mapped[int] = mapped_column(BigInteger)
+    # Live data (file minus reusable space). The cap projection runs on this:
+    # the file can grow while live data is flat, and vice versa.
+    live_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True, default=None)
     sampled_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True,
         default=lambda: datetime.now(timezone.utc),

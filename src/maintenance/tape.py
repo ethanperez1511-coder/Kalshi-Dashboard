@@ -52,7 +52,10 @@ PAYLOAD_ALWAYS_KEPT = ("trade", "snapshot")
 BATCH = 20_000
 # Each UPDATE writes a new row version before VACUUM reclaims the old one, so
 # the pass itself adds storage. It stops before the cap can be approached.
-CAP_STOP_FRACTION = 0.90
+# Below this the pass runs, in BATCH-row steps with VACUUM after each. It was
+# 0.90 until 2026-10-13, when it blocked the one step that frees space at a
+# 903 MB file holding 206 MB reusable (ruling: allow it below 95%).
+CAP_STOP_FRACTION = 0.95
 # An UPDATE writes a new row version before the old one is reclaimed. With
 # little free space (46 MB in production on 2026-10-12) a single long pass
 # would grow the file by the size of every new version. A plain VACUUM every

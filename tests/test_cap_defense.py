@@ -58,7 +58,8 @@ def _sizes(monkeypatch, engine, file_fraction, live_per_row):
 
 
 def test_below_eighty_five_percent_nothing_happens(engine, monkeypatch):
-    _sizes(monkeypatch, engine, 0.84, live_per_row=0.09 * CAP)
+    # Live 80%, file 84%: neither trigger.
+    _sizes(monkeypatch, engine, 0.84, live_per_row=0.08 * CAP)
     alerts = []
     assert defend_cap(engine, NOW, alerts.append) == []
     assert len(_ages(engine)) == DELTA_RETENTION_DAYS and alerts == []
@@ -88,7 +89,7 @@ def test_it_never_goes_below_the_seven_day_floor(engine, monkeypatch):
 
 def test_dead_pages_get_a_shrink_alert_not_a_deletion(engine, monkeypatch):
     """File high, live low: the realistic case after a big prune."""
-    _sizes(monkeypatch, engine, 0.88, live_per_row=0.02 * CAP)  # 28% live
+    _sizes(monkeypatch, engine, 0.96, live_per_row=0.02 * CAP)  # file 96%, ~20% live
     alerts = []
 
     assert defend_cap(engine, NOW, alerts.append) == []

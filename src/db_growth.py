@@ -48,12 +48,18 @@ def database_size_bytes(engine: Engine) -> Optional[int]:
 
 def record_sample(
     engine: Engine, now: Optional[dt.datetime] = None, size_bytes: Optional[int] = None,
+    live_bytes: Optional[int] = None,
 ) -> Optional[int]:
-    """Record today's size. One row per day; later calls that day update it."""
+    """Record today's size and live data. One row per day; later calls that
+    day update it."""
     now = now or dt.datetime.now(dt.timezone.utc)
     size = size_bytes if size_bytes is not None else database_size_bytes(engine)
     if size is None:
         return None
+    if live_bytes is None and size_bytes is None:
+        from src.maintenance.retention import live_bytes_estimate
+
+        live_bytes = live_bytes_estimate(engine)
 
     today = now.date()
     with get_session(engine) as session:
@@ -62,10 +68,11 @@ def record_sample(
         ).scalar_one_or_none()
         if existing is None:
             session.add(DbSizeSample(
-                sampled_on=today, size_bytes=size, sampled_at=now,
+                sampled_on=today, size_bytes=size, live_bytes=live_bytes, sampled_at=now,
             ))
         else:
             existing.size_bytes = size
+            existing.live_bytes = live_bytes
             existing.sampled_at = now
         session.commit()
     return size
@@ -77,15 +84,21 @@ def growth(engine: Engine, now: Optional[dt.datetime] = None) -> dict:
     cutoff = now.date() - dt.timedelta(days=TREND_DAYS)
 
     with get_session(engine) as session:
-        rows: List[Tuple[dt.date, int]] = session.execute(
-            select(DbSizeSample.sampled_on, DbSizeSample.size_bytes)
+        raw = session.execute(
+            select(DbSizeSample.sampled_on, DbSizeSample.size_bytes, DbSizeSample.live_bytes)
             .where(DbSizeSample.sampled_on >= cutoff)
             .order_by(DbSizeSample.sampled_on)
         ).all()
+    # Project on LIVE data when every sample in the window has it: the file
+    # can grow while live data is flat (reusable space being refilled), and
+    # extrapolating the file then announces a deadline that does not exist.
+    use_live = len(raw) >= 2 and all(r[2] is not None for r in raw)
+    rows: List[Tuple[dt.date, int]] = [(r[0], r[2] if use_live else r[1]) for r in raw]
 
     if not rows:
         return {"samples": 0, "current_bytes": None, "mb_per_day": None,
                 "days_to_full": None}
+    file_now = raw[-1][1]
 
     first_day, first_size = rows[0]
     last_day, last_size = rows[-1]
@@ -94,7 +107,7 @@ def growth(engine: Engine, now: Optional[dt.datetime] = None) -> dict:
     if span_days <= 0:
         # One day of history is a level, not a rate. Saying so beats printing
         # a slope computed from a single point.
-        return {"samples": len(rows), "current_bytes": last_size,
+        return {"samples": len(rows), "current_bytes": file_now,
                 "mb_per_day": None, "days_to_full": None}
 
     bytes_per_day = (last_size - first_size) / span_days
@@ -105,10 +118,11 @@ def growth(engine: Engine, now: Optional[dt.datetime] = None) -> dict:
 
     return {
         "samples": len(rows),
-        "current_bytes": last_size,
+        "current_bytes": file_now,
         "mb_per_day": bytes_per_day / MB,
         "days_to_full": days_to_full,
         "span_days": span_days,
+        "basis": "live" if use_live else "file",
     }
 
 
@@ -123,7 +137,7 @@ def format_growth(data: dict) -> str:
     if rate is None:
         return line + f" — no trend yet ({data.get('samples', 0)} sample(s))"
 
-    line += f", {rate:+.1f} MB/day over {data.get('span_days')}d"
+    line += f", {data.get('basis', 'file')} data {rate:+.1f} MB/day over {data.get('span_days')}d"
     days = data.get("days_to_full")
     if days is not None and days < 30:
         line += (

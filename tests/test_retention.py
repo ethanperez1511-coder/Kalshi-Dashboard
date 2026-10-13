@@ -184,9 +184,10 @@ class TestLiveDataIsReportedNotJudged:
         line = format_size_line(RetentionPlan(size_bytes=738 * 1_000_000, live_bytes=300 * 1_000_000))
         assert "738 MB file" in line and "~300 MB live" in line and "438 MB reusable" in line
 
-    def test_the_cap_alarm_reads_the_file_whatever_is_live(self):
-        """Dead pages still count against Neon's cap."""
-        plan = RetentionPlan(size_bytes=900 * 1_000_000, live_bytes=100 * 1_000_000)
+    def test_the_file_alarm_fires_whatever_is_live(self):
+        """Dead pages still count against Neon's cap: a file at 95% has almost
+        no room left to extend, however much of it is reusable."""
+        plan = RetentionPlan(size_bytes=960 * 1_000_000, live_bytes=100 * 1_000_000)
         assert format_size_line(plan).startswith("🚨")
 
     def test_live_estimate_is_none_off_postgres(self, engine):

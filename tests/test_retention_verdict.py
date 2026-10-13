@@ -50,6 +50,13 @@ def test_a_failed_compaction_is_red_at_any_size(seeded, monkeypatch):
     assert _run_prune(seeded, monkeypatch, 300 * MB) == 1
 
 
-@pytest.mark.parametrize("mb,mark", [(700, "💾"), (760, "⚠️"), (860, "🚨")])
-def test_the_digest_marks_the_file_against_the_cap(mb, mark):
-    assert format_size_line(RetentionPlan(size_bytes=mb * MB, live_bytes=300 * MB)).startswith(mark)
+@pytest.mark.parametrize("file_mb,live_mb,mark", [
+    (700, 300, "💾"),
+    (760, 760, "⚠️"),    # live at the warn line
+    (860, 860, "🚨"),    # live at the alarm line
+    (905, 300, "⚠️"),    # file at 90%: reusable space shrinking
+    (960, 300, "🚨"),    # file at 95%: almost no room to extend
+])
+def test_the_digest_marks_real_use_and_the_file(file_mb, live_mb, mark):
+    """Since 2026-10-13: live data against the cap, with lines on the file."""
+    assert format_size_line(RetentionPlan(size_bytes=file_mb * MB, live_bytes=live_mb * MB)).startswith(mark)

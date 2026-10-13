@@ -79,7 +79,7 @@ class TestSpaceGuard:
         assert execute_vacuum(db_engine, plan) == {}
 
 
-def _run_prune(engine, monkeypatch, size_bytes):
+def _run_prune(engine, monkeypatch, size_bytes, live_bytes=None):
     """`python -m src.maintenance.prune` as __main__, with the measured size
     fixed. A SQLite test DB is a few KB and cannot show a budget breach."""
     import src.config
@@ -89,6 +89,7 @@ def _run_prune(engine, monkeypatch, size_bytes):
     monkeypatch.setattr(src.database, "get_engine", lambda url=None, *a, **k: engine)
     monkeypatch.setattr(src.database, "verify_or_migrate", lambda *a, **k: None)
     monkeypatch.setattr(retention, "database_size_bytes", lambda e: size_bytes)
+    monkeypatch.setattr(retention, "live_bytes_estimate", lambda e: live_bytes)
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://stub/stub")
     monkeypatch.setattr(sys, "argv", ["src.maintenance.prune"])
     monkeypatch.delitem(sys.modules, "src.maintenance.prune", raising=False)
