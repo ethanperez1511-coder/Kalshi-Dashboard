@@ -11,7 +11,7 @@ export OCI_CLI_PROFILE=KALSHI_RETRY
 case "$SSH_PUBLIC_KEY_FILE" in *.pub) ;; *) echo "SSH_PUBLIC_KEY_FILE must be the .pub file"; exit 2;; esac
 
 ads=$(oci iam availability-domain list --compartment-id "$COMPARTMENT_OCID" \
-        --query 'data[].name' --raw-output | tr -d '[]", ' | grep -v '^$')
+        --query 'data[].name' --raw-output | tr -d '[]" ' | tr ',' '\n' | grep -v '^$')
 image=$(oci compute image list --compartment-id "$COMPARTMENT_OCID" \
           --operating-system "Canonical Ubuntu" --operating-system-version "24.04" \
           --shape VM.Standard.A1.Flex --sort-by TIMECREATED --sort-order DESC \
