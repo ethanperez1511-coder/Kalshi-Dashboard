@@ -103,6 +103,25 @@ def main(argv=None) -> int:
             text += "\n\nCAP DEFENSE FAILED — see logs"
             failed_steps.append("cap defense")
 
+    # Per-table sizes on every run, so a jump can be attributed from the run
+    # summary instead of guessed (2026-10-13: +89 MB in six hours, unattributed).
+    if engine.dialect.name == "postgresql":
+        try:
+            from sqlalchemy import text as _sql
+
+            with engine.connect() as conn:
+                rows = conn.execute(_sql(
+                    "SELECT c.relname, pg_total_relation_size(c.oid) FROM pg_class c "
+                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                    "WHERE c.relkind = 'r' AND n.nspname = 'public' "
+                    "ORDER BY 2 DESC LIMIT 8"
+                )).all()
+            text += "\n\nTABLES (total incl. indexes):\n" + "\n".join(
+                f"  {name:28s} {size / MB:>8.1f} MB" for name, size in rows
+            )
+        except Exception:
+            logger.warning("Per-table sizes unavailable", exc_info=True)
+
     # Red means one of two things: the file is at the fail line of Neon's
     # cap, or a retention step failed. Never "over a budget" while healthy.
     over = not args.dry_run and plan.cap_fail

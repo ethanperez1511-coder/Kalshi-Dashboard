@@ -37,6 +37,7 @@ on:
           - day7                # read-only: trade-through measurement
           - clear-halt          # lists latched halts; CLEAR-HALT clears them
           - promote-ramp        # live size ramp eligibility; PROMOTE-RAMP promotes
+          - cut-tape            # emergency: keep `days` of tape (floor 7); CUT-TAPE
           - wipe-void-shadow    # WIPE-VOID-SHADOW
           - shrink-tape         # measurement; SHRINK-TAPE shrinks (see max_chunks)
           - vacuum-full         # VACUUM-FULL-TAPE
@@ -44,11 +45,15 @@ on:
           - retire-deploy       # needs retire_sha; RETIRE-DEPLOY-SHA
           - legacy-positions    # CLOSE-LEGACY-POSITIONS
       confirm:
-        description: "The action's exact token (CLEAR-HALT, PROMOTE-RAMP, WIPE-VOID-SHADOW, SHRINK-TAPE, VACUUM-FULL-TAPE, PURGE-ORPHAN-MARKETS, RETIRE-DEPLOY-SHA, CLOSE-LEGACY-POSITIONS). Blank = dry run."
+        description: "The action's exact token (CLEAR-HALT, PROMOTE-RAMP, CUT-TAPE, WIPE-VOID-SHADOW, SHRINK-TAPE, VACUUM-FULL-TAPE, PURGE-ORPHAN-MARKETS, RETIRE-DEPLOY-SHA, CLOSE-LEGACY-POSITIONS). Blank = dry run."
         required: false
         default: ""
       retire_sha:
         description: "retire-deploy only: the deploy SHA to retire (e.g. e807f8dd)."
+        required: false
+        default: ""
+      days:
+        description: "cut-tape only: days of tape to keep (7 or more)."
         required: false
         default: ""
       max_chunks:
@@ -80,6 +85,7 @@ jobs:
           RETIRE_SHA: ${{ inputs.retire_sha }}
           CONFIRM: ${{ inputs.confirm }}
           MAX_CHUNKS: ${{ inputs.max_chunks }}
+          DAYS: ${{ inputs.days }}
         # Inputs go through the environment, never interpolated into the shell
         # command: a workflow_dispatch input is attacker-controlled text and
         # "${{ inputs.x }}" inside `run:` is a shell injection.
@@ -90,6 +96,7 @@ jobs:
             day7)              python -m src.execution.day7 ;;
             clear-halt)        python -m src.maintenance --clear-halt --confirm "$CONFIRM" ;;
             promote-ramp)      python -m src.maintenance --promote-ramp --confirm "$CONFIRM" ;;
+            cut-tape)          python -m src.maintenance --cut-tape --days "$DAYS" --confirm "$CONFIRM" ;;
             wipe-void-shadow)  python -m src.maintenance --wipe-void-shadow --confirm "$CONFIRM" ;;
             shrink-tape)
               if [ -n "$MAX_CHUNKS" ]; then

@@ -106,6 +106,11 @@ def main(argv=None) -> int:
         ),
     )
     parser.add_argument(
+        "--cut-tape", action="store_true",
+        help="Emergency: delete tape older than --days (floor 7). Dry run unless --confirm CUT-TAPE.",
+    )
+    parser.add_argument("--days", type=int, default=None, help="With --cut-tape: days of tape to keep.")
+    parser.add_argument(
         "--promote-ramp", action="store_true",
         help="Show live size-ramp eligibility; promote one stage with --confirm PROMOTE-RAMP.",
     )
@@ -145,6 +150,9 @@ def main(argv=None) -> int:
 
     if args.vacuum_full:
         return _vacuum_full(engine, args.confirm.strip())
+
+    if args.cut_tape:
+        return _cut_tape(engine, args.days, args.confirm.strip())
 
     if args.promote_ramp:
         return _promote_ramp(engine, args.confirm.strip())
@@ -280,6 +288,54 @@ def _vacuum_full(engine, token: str) -> int:
         f"{len(plan.refused)} refused by the space guard"
     )
     write_summary(headline, text[:4000], ok=True)
+    return 0
+
+
+CUT_TAPE_TOKEN = "CUT-TAPE"
+
+
+def _cut_tape(engine, days, token: str) -> int:
+    """Delete tape older than `days`, in batches, then VACUUM: frees space
+    inside the file so new writes stop extending it. Never below the floor."""
+    import datetime as dt
+
+    from sqlalchemy import func, select
+
+    from src.database import get_session
+    from src.maintenance.retention import (
+        TAPE_FLOOR_DAYS, database_size_bytes, live_bytes_estimate, prune_tape,
+        size_status, tape_cutoff, vacuum_pruned_tables,
+    )
+    from src.models.orderbook_raw import OrderbookDeltaRaw
+
+    if token and token != CUT_TAPE_TOKEN:
+        logger.error("Confirmation token did not match. Expected %r, got %r. "
+                     "Nothing was changed.", CUT_TAPE_TOKEN, token)
+        write_summary("Cut tape: BAD CONFIRM TOKEN — nothing changed", ok=False)
+        return 2
+    if days is None or days < TAPE_FLOOR_DAYS:
+        msg = f"Refused: --days must be at least the {TAPE_FLOOR_DAYS}-day floor (got {days})"
+        print(msg)
+        write_summary("Cut tape: " + msg, ok=False)
+        return 2
+
+    now = dt.datetime.now(dt.timezone.utc)
+    with get_session(engine) as session:
+        doomed = session.execute(
+            select(func.count(OrderbookDeltaRaw.id))
+            .where(OrderbookDeltaRaw.received_at < tape_cutoff(now, days))
+        ).scalar() or 0
+    before = size_status(database_size_bytes(engine), live_bytes_estimate(engine))
+    if token != CUT_TAPE_TOKEN:
+        text = f"CUT TAPE DRY RUN: keep {days} days; would delete {doomed:,} rows\n  now: {before}"
+    else:
+        deleted = prune_tape(engine, now, days=days)
+        vacuum_pruned_tables(engine)
+        after = size_status(database_size_bytes(engine), live_bytes_estimate(engine))
+        text = (f"CUT TAPE EXECUTED: kept {days} days; deleted {deleted:,} rows\n"
+                f"  before: {before}\n  after:  {after}")
+    print(text)
+    write_summary(text.splitlines()[0], text, ok=True)
     return 0
 
 
