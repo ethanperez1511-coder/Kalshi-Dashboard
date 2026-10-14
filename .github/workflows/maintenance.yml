@@ -76,6 +76,15 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install .
+      # The same additive migrator the cycle runs, before any action, so a
+      # lagging schema never blocks maintenance. continue-on-error: if it
+      # fails (at Neon's cap even ALTER TABLE can be refused), db-stats and
+      # cut-tape still run; every other action refuses a lagging schema.
+      - name: Apply pending schema migrations
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.migrate
       - name: Census, reconcile or retire (acts only if confirmed)
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}

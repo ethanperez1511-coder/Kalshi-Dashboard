@@ -33,7 +33,7 @@ import logging
 import sys
 
 from src.config import Settings, require_production_database
-from src.database import get_engine, verify_or_migrate
+from src.database import SchemaOutOfDate, get_engine, verify_or_migrate
 from src.maintenance.db_stats import collect as collect_db_stats, format_report as format_db_stats
 from src.maintenance.purge_markets import (
     CONFIRM_TOKEN as PURGE_TOKEN,
@@ -140,7 +140,19 @@ def main(argv=None) -> int:
     settings = Settings()
     require_production_database(settings.DATABASE_URL)
     engine = get_engine(settings.DATABASE_URL)
-    verify_or_migrate(engine, migrate=settings.MIGRATE_ON_BOOT, context="maintenance")
+    try:
+        verify_or_migrate(engine, migrate=settings.MIGRATE_ON_BOOT, context="maintenance")
+    except SchemaOutOfDate:
+        # The workflow migrates first; this is the case where that failed (at
+        # Neon's cap even ALTER TABLE can be refused). The census and the
+        # emergency tape cut are what an operator needs exactly then. Cut-tape
+        # touches only orderbook_delta_raw.id and received_at; db-stats reads
+        # catalog sizes and long-standing markets columns.
+        # Every other action writes through the models and still refuses.
+        if not (args.db_stats or args.cut_tape):
+            raise
+        logger.warning("Schema is behind; running %s anyway",
+                       "--db-stats" if args.db_stats else "--cut-tape")
 
     if args.db_stats:
         return _db_stats(engine)

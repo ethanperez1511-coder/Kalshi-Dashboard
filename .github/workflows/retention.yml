@@ -38,6 +38,14 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install .
+      # Same additive migrator as the cycle: retention refuses a lagging
+      # schema, and it is the job that frees space. continue-on-error so a
+      # refused ALTER at the cap surfaces in the retention step itself.
+      - name: Apply pending schema migrations
+        continue-on-error: true
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m src.migrate
       - name: Apply retention
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
