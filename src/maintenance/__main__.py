@@ -132,6 +132,10 @@ def main(argv=None) -> int:
         help="With --shrink-tape: stop after this many chunks (an installment; no reindex).",
     )
     parser.add_argument(
+        "--paper-summary", action="store_true",
+        help="Read-only: every paper trade and the gate-counted subset, with the bankroll reconciled.",
+    )
+    parser.add_argument(
         "--db-stats", action="store_true",
         help="Read-only census of table sizes, market statuses and growth rates.",
     )
@@ -156,6 +160,9 @@ def main(argv=None) -> int:
 
     if args.db_stats:
         return _db_stats(engine)
+
+    if args.paper_summary:
+        return _paper_summary(engine)
 
     if args.purge_markets:
         return _purge(engine, args.confirm.strip())
@@ -211,6 +218,19 @@ def main(argv=None) -> int:
     )
     write_summary(headline, text[:4000], ok=True)
     return 0
+
+def _paper_summary(engine) -> int:
+    """Read-only. A summary with no paper trades in it is not a summary."""
+    from src.maintenance.paper_summary import format_summary, summarize
+
+    report = summarize(engine)
+    a = report.scopes["all"]
+    return publish_report(
+        f"Paper summary: bankroll ${report.bankroll:.2f}, {a.settled} settled, {a.open} open",
+        format_summary(report),
+        substantive=a.total > 0,
+    )
+
 
 def _db_stats(engine) -> int:
     """Print the census and put it on the Actions summary. Changes nothing.

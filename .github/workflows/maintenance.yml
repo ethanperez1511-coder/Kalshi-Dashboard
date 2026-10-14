@@ -37,6 +37,7 @@ on:
           - day7                # read-only: trade-through measurement
           - clear-halt          # lists latched halts; CLEAR-HALT clears them
           - promote-ramp        # live size ramp eligibility; PROMOTE-RAMP promotes
+          - paper-summary       # read-only: all paper trades + gate-counted, bankroll reconciled
           - cut-tape            # emergency: keep `days` of tape (floor 7); CUT-TAPE
           - wipe-void-shadow    # WIPE-VOID-SHADOW
           - shrink-tape         # measurement; SHRINK-TAPE shrinks (see max_chunks)
@@ -101,6 +102,7 @@ jobs:
         run: |
           case "$ACTION" in
             db-stats)          python -m src.maintenance --db-stats ;;
+            paper-summary)     python -m src.maintenance --paper-summary ;;
             pending-matches)   python -m src.maintenance --pending-matches ;;
             day7)              python -m src.execution.day7 ;;
             clear-halt)        python -m src.maintenance --clear-halt --confirm "$CONFIRM" ;;
