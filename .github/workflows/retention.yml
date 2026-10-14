@@ -9,8 +9,13 @@ name: retention
 # database fills while they are protected, the correct outcome is a loud failure,
 # not the destruction of the one dataset with no second source.
 on:
+  # Three a day (2026-10-14) so the compaction backlog clears in days, not
+  # weeks: each run's pass is bounded by its own guards and a 12-min budget.
+  # None falls inside the 15:00-21:00 UTC session, when the recorder writes.
   schedule:
     - cron: "25 4 * * *"
+    - cron: "25 10 * * *"
+    - cron: "25 22 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -25,7 +30,7 @@ concurrency:
 jobs:
   prune:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

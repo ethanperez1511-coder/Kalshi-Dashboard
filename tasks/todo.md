@@ -2144,3 +2144,20 @@ only the token clears it.
 - Safety: the ramp can only lower quantity (property test over stages ×
   quantities). Limits, Kelly, mode and the live gate are untouched (pinned
   test). Paper mode is inert. Nothing flips live.
+
+## 2026-10-14 storage follow-ups (retention green, live +59 MB/day)
+- [ ] One headroom number: the heartbeat DB line passes live data to
+      size_status (it printed cap − file = 92 MB beside cap − live = 194 MB).
+- [ ] Projection on live: growth() used live only if EVERY sample in the
+      7-day window had it; samples from before 2026-10-13 have none, so it
+      fell back to the file. Use the trailing samples that have live; with
+      fewer than two days of them, print no deadline.
+- [ ] Per-table daily sample (heap / index / toast) so a day's growth is
+      attributable in the digest, not only in a retention log.
+- [ ] Compaction: run cap 200k -> 1M, a 12-minute time budget, and two
+      measured guards that stop the pass: file grew > 8 MB since the pass
+      began, or tape index growth > half the payload bytes nulled (net loss).
+      Retention 3x a day (04:25, 10:25, 22:25), timeout 30 min.
+- Safety: maintenance only. No trading path, risk limit, mode or live gate is
+  touched. Every guard stops a pass early; none lets it run longer than
+  measured safe. Each batch still commits alone (no partial state).

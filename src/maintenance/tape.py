@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -63,11 +64,32 @@ CAP_STOP_FRACTION = 0.95
 VACUUM_EVERY_BATCHES = 1
 # Rows nulled per run. Each nulled row adds a new entry to all four indexes
 # before VACUUM can reclaim the old ones: measured on Postgres 16, 432k rows
-# grew a 313 MB table by 44 MB even with VACUUM after every batch. Production
-# had ~765k rows of backlog and 46 MB of free space at 807 MB (2026-10-12), so
-# one pass would end near the 90% line. Capped, the backlog clears over a few
-# daily runs at ~+20 MB each; the steady daily flow (~70k) sits well under it.
-MAX_ROWS_PER_RUN = 200_000
+# grew a 313 MB table by 44 MB even with VACUUM after every batch. Until
+# 2026-10-14 a fixed 200k cap stood in for that risk, and an 892k backlog
+# needed five daily runs. The cap is now a backstop: the pass is stopped by
+# what it measures (the guards below), not by a guess at a safe row count.
+MAX_ROWS_PER_RUN = 1_000_000
+# Stop if the FILE has grown this much since the pass began. Nulling is meant
+# to fill reusable space, never to extend the file toward the cap.
+FILE_GROWTH_LIMIT_BYTES = 8 * 1_000_000
+# Stop if the tape's indexes have grown by more than this share of the payload
+# bytes freed: past that point the pass costs more space than it returns.
+NET_LOSS_RATIO = 0.5
+# Indexes grow in 8 KB pages, so on a small pass one new page outweighs the
+# payload freed. The ratio applies only once growth passes this floor.
+NET_LOSS_MIN_BYTES = 1_000_000
+# Leaves room inside retention's 30-minute job for prune and cap defense.
+TIME_BUDGET_SECONDS = 12 * 60
+
+
+def tape_index_bytes(engine: Engine) -> Optional[int]:
+    """Bytes in orderbook_delta_raw's indexes. Postgres only."""
+    if engine.dialect.name != "postgresql":
+        return None
+    with engine.connect() as conn:
+        return int(conn.execute(text(
+            "SELECT pg_indexes_size('orderbook_delta_raw'::regclass)"
+        )).scalar())
 
 
 @dataclass
@@ -126,16 +148,36 @@ def compact_tape(
     nulled = 0
     batches = 0
     stopped = ""
+    # Payload bytes per row, from the plan: an estimate, since one UPDATE per
+    # batch is chosen server-side and never ships ids or lengths back.
+    per_row = plan.bytes_reclaimed / plan.deltas_to_null if plan.deltas_to_null else 0
+    started = time.monotonic()
+    file_start = database_size_bytes(engine)
+    index_start = tape_index_bytes(engine)
 
     while True:
         if nulled >= MAX_ROWS_PER_RUN:
             stopped = f"run cap: {MAX_ROWS_PER_RUN:,} rows nulled; the rest continues next run"
-            logger.info("Tape compaction: %s", stopped)
             break
-        if database_size_bytes(engine) >= CAP_STOP_FRACTION * NEON_CAP_BYTES:
+        size = database_size_bytes(engine)
+        if size >= CAP_STOP_FRACTION * NEON_CAP_BYTES:
             stopped = f"cap guard: database at {CAP_STOP_FRACTION:.0%} of the Neon cap"
-            logger.error("Tape compaction stopped: %s", stopped)
             break
+        if size - file_start > FILE_GROWTH_LIMIT_BYTES:
+            stopped = (f"file grew {(size - file_start) / 1e6:.0f} MB during the pass; "
+                       f"stopped so nulling cannot extend the file")
+            break
+        if batches:
+            if time.monotonic() - started >= TIME_BUDGET_SECONDS:
+                stopped = f"time budget: {TIME_BUDGET_SECONDS // 60} min; the rest continues next run"
+                break
+            index_now = tape_index_bytes(engine) if index_start is not None else None
+            if (index_now is not None
+                    and index_now - index_start > NET_LOSS_MIN_BYTES
+                    and index_now - index_start > NET_LOSS_RATIO * nulled * per_row):
+                stopped = (f"net loss: indexes grew {(index_now - index_start) / 1e6:.1f} MB "
+                           f"against ~{nulled * per_row / 1e6:.1f} MB of payload freed")
+                break
         with get_session(engine) as session:
             # One statement per batch, ids chosen by the server: no id list
             # crosses the wire and no bind-parameter count grows with BATCH.
@@ -165,11 +207,23 @@ def compact_tape(
             with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
                 conn.execute(text("VACUUM orderbook_delta_raw"))
 
+    if stopped:
+        logger.warning("Tape compaction stopped: %s", stopped)
+    index_end = tape_index_bytes(engine) if index_start is not None else None
+    file_end = database_size_bytes(engine)
     logger.info(
         "Tape compaction: nulled %d delta payloads older than %d days",
         nulled, COMPACTION_WINDOW_DAYS,
     )
-    return {"nulled": nulled, "bytes_reclaimed": plan.bytes_reclaimed, "stopped": stopped}
+    return {
+        "nulled": nulled,
+        "bytes_reclaimed": plan.bytes_reclaimed,
+        "payload_bytes_freed": int(nulled * per_row),
+        "index_growth": None if index_end is None else index_end - index_start,
+        "file_growth": file_end - file_start,
+        "remaining": max(plan.deltas_to_null - nulled, 0),
+        "stopped": stopped,
+    }
 
 
 def format_compaction(plan: CompactionPlan, executed: Optional[dict] = None) -> str:
@@ -191,7 +245,12 @@ def format_compaction(plan: CompactionPlan, executed: Optional[dict] = None) -> 
         "  its anchoring snapshot reconstructs nothing.",
     ]
     if executed:
-        lines.append(f"\n  RESULT: {executed['nulled']:,} payloads nulled")
+        lines.append(f"\n  RESULT: {executed['nulled']:,} payloads nulled, "
+                     f"~{executed.get('payload_bytes_freed', 0) / 1e6:.1f} MB of payload freed, "
+                     f"{executed.get('remaining', 0):,} left")
+        if executed.get("index_growth") is not None:
+            lines.append(f"  indexes {executed['index_growth'] / 1e6:+.1f} MB · "
+                         f"file {executed.get('file_growth', 0) / 1e6:+.1f} MB during the pass")
         if executed.get("stopped"):
             lines.append(f"  STOPPED: {executed['stopped']}")
     return "\n".join(lines)
