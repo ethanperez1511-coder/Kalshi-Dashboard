@@ -66,15 +66,17 @@ def test_below_eighty_five_percent_nothing_happens(engine, monkeypatch):
 
 
 def test_it_cuts_the_oldest_day_first_and_alerts_each_step(engine, monkeypatch):
-    # 10 rows x 8.5% = 85% live. Cut to 8 days -> 68%: two steps.
-    _sizes(monkeypatch, engine, 0.90, live_per_row=0.085 * CAP)
+    # The 8-day window (2026-10-14) leaves one step above the 7-day floor.
+    # 8 rows x 11% = 88% live. Cut to 7 days -> 77%: one step, then the floor.
+    assert DELTA_RETENTION_DAYS == 8
+    _sizes(monkeypatch, engine, 0.90, live_per_row=0.11 * CAP)
     alerts = []
 
     steps = defend_cap(engine, NOW, alerts.append)
 
-    assert len(steps) == 2
-    assert _ages(engine) == list(range(8))        # ages 8 and 9 gone, oldest first
-    assert len(alerts) == 2 and all("tape window" in a for a in alerts)
+    assert len(steps) == 1
+    assert _ages(engine) == list(range(7))        # age 7 gone: the oldest day
+    assert "tape window cut to 7 days" in alerts[0]
 
 
 def test_it_never_goes_below_the_seven_day_floor(engine, monkeypatch):

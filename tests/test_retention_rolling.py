@@ -30,9 +30,10 @@ from src.models.orderbook_raw import OrderbookDeltaRaw
 NOW = dt.datetime(2026, 10, 12, 12, tzinfo=dt.timezone.utc)
 
 # The ruling. Restated, not imported: if the constant drifts, this should fail.
-# 14 days from 2026-10-06; cut to 10 on 2026-10-12 as a margin under Neon's
-# cap until the Oracle VM (where storage stops binding) takes over.
-RULED_DAYS = 10
+# 14 days from 2026-10-06; 10 on 2026-10-12; 8 on 2026-10-14 until the
+# Oracle VM (where storage stops binding, and it returns to 14). At 10 the
+# window regrew after every cap-defense cut to 8: a sawtooth into the cap.
+RULED_DAYS = 8
 
 
 @pytest.fixture

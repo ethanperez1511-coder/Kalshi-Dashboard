@@ -76,7 +76,10 @@ SNAPSHOT_MAX_DAYS = 60
 # Orderbook tape (deltas, snapshots, trade prints): kept for this many days
 # measured back from NOW. Replay and shadow read the last two days (the
 # full-payload window), far inside it.
-DELTA_RETENTION_DAYS = 10
+# 14 -> 10 on 2026-10-12 -> 8 on 2026-10-14 (ruling), until the Oracle VM,
+# where it returns to 14. At 10, every cap-defense cut to 8 regrew at ~46 MB
+# a day for two days and tripped the defense again: a sawtooth into the cap.
+DELTA_RETENTION_DAYS = 8
 # 14 until 2026-10-12, cut to 10 as a margin under Neon's cap while the tape is
 # almost all live (dry run: ~726 MB rebuilt of a 698 MB file, 186 MB headroom).
 # Restore 14 on the Oracle VM, where storage stops binding.
