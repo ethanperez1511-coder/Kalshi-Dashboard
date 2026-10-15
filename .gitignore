@@ -8,3 +8,5 @@ kalshi.db.bak*
 __pycache__/
 *.egg-info/
 .DS_Store
+research/weather_assessment/cache/
+research/weather_assessment/results/market_events.csv

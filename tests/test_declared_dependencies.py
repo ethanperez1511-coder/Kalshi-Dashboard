@@ -19,7 +19,7 @@ from importlib import metadata
 
 
 ROOTS = ("src", "tests")
-LOCAL = {"src", "tests", "deploy"}
+LOCAL = {"src", "tests", "deploy", "research"}
 
 
 def _declared() -> set:

@@ -2166,3 +2166,33 @@ only the token clears it.
 - Review: 6ef7219, cd96d8c, 3e6e276. Suite 1367 passed with Postgres 16
   (0 skipped). Real-Postgres compaction pass on a production-shaped table:
   48k rows nulled, ~10.7 MB payload freed, index +1.0 MB, file +1.0 MB.
+
+## 2026-10-15 weather accuracy assessment (read-only; no model change)
+Ruling asked: rank five candidates by expected accuracy gain, walk-forward,
+held-out, no lookahead; Brier skill + reliability per (station, lead).
+- [x] Data: MEX 12Z and NBE 13Z daily max (IEM bulk CSV, cached, polite
+      pacing after 429s), GHCN-Daily TMAX truth (NCEI), Kalshi settled-market
+      prices for option 5 (public market data; depth to be measured).
+- [x] Harness in research/weather_assessment/ (not imported by src/, never
+      on the trading path). Incumbent = production: MEX + trailing-90d bias,
+      Normal sd from the same window, continuity correction.
+- [x] NO LOOKAHEAD, stated precisely: a forecast for target T at lead L is
+      issued on T-L; only outcomes with target <= T-L-1 may enter any fit.
+      (The repo's score_rolling uses target < T, which leaks up to L-1 days
+      for L >= 2; harmless over 90 days, fatal for a 5-day recency window.)
+- [x] Candidates: (1) recency bias, weights 10/10/15/25/40 over 5 days, also
+      3-day, 7-day, equal weights; sd re-fitted on the corrected residuals;
+      (2) NBE alone and MEX+NBE blend (weights fit trailing); (3) sd from
+      NBE xnd (sd = a + b*xnd, fit trailing); (4) Student-t, df fit
+      trailing; (5) blend with market price, on the days market data exists.
+- [x] Score: Brier on the production strike ladder (+/-6F) and on 2F
+      buckets; BSS vs climatology and vs incumbent; reliability slope; paired
+      day-block bootstrap CI on the Brier difference; per (station, lead).
+- [x] Terms of use for every source, verified from the source's own page.
+- Safety: nothing in src/ changes; no DB writes; no trading path touched;
+  live mode untouched.
+- Review: research/weather_assessment/README.md. 43,473 station-days, 57
+  cells. Ranking: NBE blend + xnd spread -13.8% ladder Brier (57/57 cells),
+  NBE blend -12.9%, spread alone -0.8%, tails -0.2%, recency +4.5% to +13%
+  (harmful). Market at lead 1 beats every model (0.1153 vs 0.1244 best).
+  Lookahead test fails under the leaky window and passes as written.
