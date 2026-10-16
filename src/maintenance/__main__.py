@@ -132,6 +132,11 @@ def main(argv=None) -> int:
         help="With --shrink-tape: stop after this many chunks (an installment; no reindex).",
     )
     parser.add_argument(
+        "--compact-tape", action="store_true",
+        help="Emergency compaction past the 95%% line, stopping at 1 MB of file growth. "
+             "Dry run unless --confirm COMPACT-TAPE",
+    )
+    parser.add_argument(
         "--paper-summary", action="store_true",
         help="Read-only: every paper trade and the gate-counted subset, with the bankroll reconciled.",
     )
@@ -163,6 +168,9 @@ def main(argv=None) -> int:
 
     if args.paper_summary:
         return _paper_summary(engine)
+
+    if args.compact_tape:
+        return _compact_tape(engine, args.confirm.strip())
 
     if args.purge_markets:
         return _purge(engine, args.confirm.strip())
@@ -218,6 +226,31 @@ def main(argv=None) -> int:
     )
     write_summary(headline, text[:4000], ok=True)
     return 0
+
+def _compact_tape(engine, confirm: str) -> int:
+    """Null old delta payloads above the 95% line, file growth bounded."""
+    from src.maintenance.retention import database_size_bytes, live_bytes_estimate, size_status
+    from src.maintenance.tape import EMERGENCY, compact_tape, format_compaction, plan_compaction
+
+    token = "COMPACT-TAPE"
+    if confirm and confirm != token:
+        print(f"Confirmation token did not match. Expected {token!r}. Nothing was changed.")
+        write_summary("Compact tape: BAD CONFIRM TOKEN — nothing changed", ok=False)
+        return 2
+    plan = plan_compaction(engine)
+    before = size_status(database_size_bytes(engine), live_bytes_estimate(engine))
+    executed = compact_tape(engine, plan, **EMERGENCY) if confirm == token else None
+    text = format_compaction(plan, executed)
+    text += f"\n\n  before: {before}"
+    if executed:
+        text += f"\n  after : {size_status(database_size_bytes(engine), live_bytes_estimate(engine))}"
+    else:
+        text += f"\n\n  DRY RUN. Execute with confirm {token}: batches of {EMERGENCY['batch']:,}, " \
+                f"VACUUM after each, stops at {EMERGENCY['file_growth_limit'] // 1_000_000} MB of file growth."
+    print(text)
+    write_summary("Compact tape " + ("EXECUTED" if executed else "DRY RUN"), text[:4000], ok=True)
+    return 0
+
 
 def _paper_summary(engine) -> int:
     """Read-only. A summary with no paper trades in it is not a summary."""

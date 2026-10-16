@@ -81,6 +81,19 @@ NET_LOSS_MIN_BYTES = 1_000_000
 # Leaves room inside retention's 30-minute job for prune and cap defense.
 TIME_BUDGET_SECONDS = 12 * 60
 
+# The emergency pass (maintenance --compact-tape, token COMPACT-TAPE). Above
+# the 95% line retention's pass refuses, which on 2026-10-16 left 822k
+# payloads (~241 MB) unnulled with the file at the cap. The risk a pass poses
+# is extending the file, and that is measured after every batch, so the
+# emergency pass ignores the line and stops instead at 1 MB of file growth,
+# in small batches. Run by a human only.
+EMERGENCY = {
+    "ignore_cap_line": True,
+    "file_growth_limit": 1 * 1_000_000,
+    "batch": 2_000,
+    "time_budget": 25 * 60,
+}
+
 
 def tape_index_bytes(engine: Engine) -> Optional[int]:
     """Bytes in orderbook_delta_raw's indexes. Postgres only."""
@@ -142,8 +155,18 @@ def plan_compaction(
 def compact_tape(
     engine: Engine, plan: CompactionPlan, now: Optional[dt.datetime] = None,
     _before_commit: Optional[Callable[[object], None]] = None,
+    ignore_cap_line: bool = False,
+    file_growth_limit: Optional[int] = None,
+    batch: Optional[int] = None,
+    time_budget: Optional[int] = None,
 ) -> dict:
-    """Apply the plan. Nulls delta payloads older than the window."""
+    """Apply the plan. Nulls delta payloads older than the window.
+
+    The keyword overrides exist for the emergency pass (EMERGENCY); retention
+    passes none of them."""
+    growth_limit = FILE_GROWTH_LIMIT_BYTES if file_growth_limit is None else file_growth_limit
+    batch_size = BATCH if batch is None else batch
+    budget = TIME_BUDGET_SECONDS if time_budget is None else time_budget
     now = now or dt.datetime.now(dt.timezone.utc)
     nulled = 0
     batches = 0
@@ -160,16 +183,16 @@ def compact_tape(
             stopped = f"run cap: {MAX_ROWS_PER_RUN:,} rows nulled; the rest continues next run"
             break
         size = database_size_bytes(engine)
-        if size >= CAP_STOP_FRACTION * NEON_CAP_BYTES:
+        if not ignore_cap_line and size >= CAP_STOP_FRACTION * NEON_CAP_BYTES:
             stopped = f"cap guard: database at {CAP_STOP_FRACTION:.0%} of the Neon cap"
             break
-        if size - file_start > FILE_GROWTH_LIMIT_BYTES:
+        if size - file_start > growth_limit:
             stopped = (f"file grew {(size - file_start) / 1e6:.0f} MB during the pass; "
                        f"stopped so nulling cannot extend the file")
             break
         if batches:
-            if time.monotonic() - started >= TIME_BUDGET_SECONDS:
-                stopped = f"time budget: {TIME_BUDGET_SECONDS // 60} min; the rest continues next run"
+            if time.monotonic() - started >= budget:
+                stopped = f"time budget: {budget // 60} min; the rest continues next run"
                 break
             index_now = tape_index_bytes(engine) if index_start is not None else None
             if (index_now is not None
@@ -188,7 +211,7 @@ def compact_tape(
                     OrderbookDeltaRaw.received_at < plan.cutoff,
                     OrderbookDeltaRaw.payload.isnot(None),
                 )
-                .limit(min(BATCH, MAX_ROWS_PER_RUN - nulled))
+                .limit(min(batch_size, MAX_ROWS_PER_RUN - nulled))
                 .scalar_subquery()
             )
             result = session.execute(

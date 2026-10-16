@@ -37,6 +37,7 @@ on:
           - day7                # read-only: trade-through measurement
           - clear-halt          # lists latched halts; CLEAR-HALT clears them
           - promote-ramp        # live size ramp eligibility; PROMOTE-RAMP promotes
+          - compact-tape        # emergency: null old payloads above 95%, stops at 1 MB file growth; COMPACT-TAPE
           - paper-summary       # read-only: all paper trades + gate-counted, bankroll reconciled
           - cut-tape            # emergency: keep `days` of tape (floor 7); CUT-TAPE
           - wipe-void-shadow    # WIPE-VOID-SHADOW
@@ -46,7 +47,7 @@ on:
           - retire-deploy       # needs retire_sha; RETIRE-DEPLOY-SHA
           - legacy-positions    # CLOSE-LEGACY-POSITIONS
       confirm:
-        description: "The action's exact token (CLEAR-HALT, PROMOTE-RAMP, CUT-TAPE, WIPE-VOID-SHADOW, SHRINK-TAPE, VACUUM-FULL-TAPE, PURGE-ORPHAN-MARKETS, RETIRE-DEPLOY-SHA, CLOSE-LEGACY-POSITIONS). Blank = dry run."
+        description: "The action's exact token (COMPACT-TAPE, CLEAR-HALT, PROMOTE-RAMP, CUT-TAPE, WIPE-VOID-SHADOW, SHRINK-TAPE, VACUUM-FULL-TAPE, PURGE-ORPHAN-MARKETS, RETIRE-DEPLOY-SHA, CLOSE-LEGACY-POSITIONS). Blank = dry run."
         required: false
         default: ""
       retire_sha:
@@ -103,6 +104,7 @@ jobs:
           case "$ACTION" in
             db-stats)          python -m src.maintenance --db-stats ;;
             paper-summary)     python -m src.maintenance --paper-summary ;;
+            compact-tape)      python -m src.maintenance --compact-tape --confirm "$CONFIRM" ;;
             pending-matches)   python -m src.maintenance --pending-matches ;;
             day7)              python -m src.execution.day7 ;;
             clear-halt)        python -m src.maintenance --clear-halt --confirm "$CONFIRM" ;;

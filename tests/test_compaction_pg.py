@@ -89,3 +89,19 @@ def test_the_daily_sample_keeps_per_table_sizes(pg):
         row = s.query(DbSizeSample).one()
         assert json.loads(row.tables_json)["orderbook_delta_raw"]["heap"] > 0
         assert row.live_bytes is not None
+
+
+def test_the_emergency_pass_fills_reusable_space_without_growing_the_file(pg):
+    """The 2026-10-16 situation: payloads to null, some reusable space from
+    pruning, and no room to extend the file."""
+    import src.maintenance.tape as tape
+
+    _load(pg)
+    plan = tape.plan_compaction(pg, now=NOW)
+    result = tape.compact_tape(pg, plan, now=NOW, **tape.EMERGENCY)
+    print(f"\nemergency: nulled {result['nulled']:,} of {plan.deltas_to_null:,}, "
+          f"freed ~{result['payload_bytes_freed'] / 1e6:.1f} MB, "
+          f"index {result['index_growth'] / 1e6:+.2f} MB, file {result['file_growth'] / 1e6:+.2f} MB, "
+          f"stopped={result['stopped']!r}")
+    assert result["file_growth"] <= tape.EMERGENCY["file_growth_limit"] + 2_000 * 400
+    assert result["nulled"] > 0
