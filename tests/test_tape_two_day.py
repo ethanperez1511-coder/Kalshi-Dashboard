@@ -111,19 +111,23 @@ def test_batches_never_exceed_twenty_thousand_rows():
     assert tape.BATCH <= 20_000
 
 
-def test_it_stops_at_ninety_five_percent_of_the_cap(engine, monkeypatch):
-    """0.90 until 2026-10-13, when it blocked the step that frees space."""
+def test_a_full_file_does_not_stop_it_file_growth_does(engine, monkeypatch):
+    """A file line stopped it (0.90, then 0.95) until 2026-10-16. The file
+    never shrinks, so once crossed the line blocked it on every run. Now only
+    growth of the file during the run (~2 MB) stops it."""
     from src.maintenance.retention import NEON_CAP_BYTES
 
     monkeypatch.setattr(tape, "BATCH", 2)
-    monkeypatch.setattr(tape, "database_size_bytes", lambda e: int(0.96 * NEON_CAP_BYTES))
     _rows(engine, "delta", hours_ago=72, n=6)
 
-    result = _compact(engine)
+    monkeypatch.setattr(tape, "database_size_bytes", lambda e: int(1.05 * NEON_CAP_BYTES))
+    assert _compact(engine)["nulled"] == 6
 
-    assert result["nulled"] == 0
-    assert "cap" in result["stopped"]
-    assert not any(_nulled(engine))
+    _rows(engine, "delta", hours_ago=72, n=6)
+    sizes = iter([NEON_CAP_BYTES, NEON_CAP_BYTES, NEON_CAP_BYTES + 3_000_000] + [NEON_CAP_BYTES + 3_000_000] * 20)
+    monkeypatch.setattr(tape, "database_size_bytes", lambda e: next(sizes))
+    result = _compact(engine)
+    assert result["nulled"] == 2 and "file grew" in result["stopped"]
 
 
 def test_one_run_stops_at_its_row_cap_and_the_next_run_continues(engine, monkeypatch):

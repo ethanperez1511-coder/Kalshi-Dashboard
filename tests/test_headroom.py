@@ -66,10 +66,12 @@ class TestCompactionGuard:
         result = tape.compact_tape(engine_with_tape, tape.plan_compaction(engine_with_tape, now=NOW), now=NOW)
         assert result["nulled"] == 6 and not result["stopped"]
 
-    def test_it_stops_at_95_percent(self, engine_with_tape, monkeypatch):
-        monkeypatch.setattr(tape, "database_size_bytes", lambda e: int(0.95 * NEON_CAP_BYTES))
+    def test_it_runs_above_95_percent_too(self, engine_with_tape, monkeypatch):
+        """Ruling 2026-10-16: the file never shrinks, so a 95% line blocked
+        compaction permanently once crossed. File growth bounds it instead."""
+        monkeypatch.setattr(tape, "database_size_bytes", lambda e: int(1.05 * NEON_CAP_BYTES))
         result = tape.compact_tape(engine_with_tape, tape.plan_compaction(engine_with_tape, now=NOW), now=NOW)
-        assert result["nulled"] == 0 and "95%" in result["stopped"]
+        assert result["nulled"] == 6 and not result["stopped"]
 
 
 class TestProjection:

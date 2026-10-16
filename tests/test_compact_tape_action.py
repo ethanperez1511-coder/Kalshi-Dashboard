@@ -58,15 +58,21 @@ def test_emergency_mode_stops_at_one_megabyte_of_file_growth(tape_engine, monkey
 
 
 def test_the_emergency_settings():
-    assert tape.EMERGENCY["ignore_cap_line"] is True
     assert tape.EMERGENCY["file_growth_limit"] == 1 * MB
     assert tape.EMERGENCY["batch"] == 2_000
 
 
-def test_retention_compaction_still_stops_at_95_percent(tape_engine, monkeypatch):
-    monkeypatch.setattr(tape, "database_size_bytes", lambda e: int(0.99 * NEON_CAP_BYTES))
+def test_retention_compaction_has_no_file_line_and_a_2_mb_bound(tape_engine, monkeypatch):
+    """Ruling 2026-10-16 (step 4): the 95% line is replaced by ~2 MB of file
+    growth per run."""
+    assert not hasattr(tape, "CAP_STOP_FRACTION")
+    assert tape.FILE_GROWTH_LIMIT_BYTES == 2 * MB
+    sizes = iter([1050 * MB, 1050 * MB, int(1052.1 * MB)] + [int(1052.1 * MB)] * 20)
+    monkeypatch.setattr(tape, "database_size_bytes", lambda e: next(sizes))
+    monkeypatch.setattr(tape, "tape_index_bytes", lambda e: 100 * MB)
+    monkeypatch.setattr(tape, "BATCH", 3)
     result = tape.compact_tape(tape_engine, tape.plan_compaction(tape_engine))
-    assert result["nulled"] == 0 and "95%" in result["stopped"]
+    assert result["nulled"] == 3 and "file grew" in result["stopped"]
 
 
 def _run(argv, engine, monkeypatch, capsys):

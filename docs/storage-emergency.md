@@ -31,9 +31,13 @@ longer exists.
    deleted day becomes reusable, and new writes go there.
 
 4. **Run retention** (5 min). **Actions → retention → Run workflow**, with
-   dry_run `false`. Payload nulling now runs below 95%, in 20k-row batches
-   with VACUUM after each, turning old delta payloads into more reusable
-   space. Its summary prints the new figures and the largest tables.
+   dry_run `false`. Payload nulling runs at any file level, in 20k-row
+   batches with VACUUM after each, and stops once the file has grown ~2 MB
+   in that run (ruling 2026-10-16; the old stop at 95% blocked it for good
+   once crossed, because the file never shrinks). Its summary prints the
+   new figures and the largest tables. With only a few MB of headroom, use
+   **maintenance → `compact-tape`** instead (dry run, then `COMPACT-TAPE`):
+   2,000-row batches, stops at 1 MB of growth.
 
 5. **If the file is at or above 97% and still rising, take a pressure valve.**
    Two options; the first is preferred:

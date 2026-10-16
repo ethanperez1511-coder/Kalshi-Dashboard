@@ -36,7 +36,7 @@ from typing import Callable, Optional
 from sqlalchemy import Engine, and_, func, select, text
 
 from src.database import get_session
-from src.maintenance.retention import NEON_CAP_BYTES, database_size_bytes
+from src.maintenance.retention import database_size_bytes
 from src.models.orderbook_raw import OrderbookDeltaRaw
 
 logger = logging.getLogger(__name__)
@@ -51,12 +51,6 @@ PAYLOAD_ALWAYS_KEPT = ("trade", "snapshot")
 # Rows per UPDATE transaction (ruling: at most 20,000). Each commits alone, so a
 # killed run keeps what it finished and loses nothing it had not.
 BATCH = 20_000
-# Each UPDATE writes a new row version before VACUUM reclaims the old one, so
-# the pass itself adds storage. It stops before the cap can be approached.
-# Below this the pass runs, in BATCH-row steps with VACUUM after each. It was
-# 0.90 until 2026-10-13, when it blocked the one step that frees space at a
-# 903 MB file holding 206 MB reusable (ruling: allow it below 95%).
-CAP_STOP_FRACTION = 0.95
 # An UPDATE writes a new row version before the old one is reclaimed. With
 # little free space (46 MB in production on 2026-10-12) a single long pass
 # would grow the file by the size of every new version. A plain VACUUM every
@@ -71,7 +65,12 @@ VACUUM_EVERY_BATCHES = 1
 MAX_ROWS_PER_RUN = 1_000_000
 # Stop if the FILE has grown this much since the pass began. Nulling is meant
 # to fill reusable space, never to extend the file toward the cap.
-FILE_GROWTH_LIMIT_BYTES = 8 * 1_000_000
+# Ruling 2026-10-16: this bound REPLACES the old stop at 95% of the cap. The
+# file never shrinks (only VACUUM FULL or a dump/restore does that), so once
+# it crossed 95% the line blocked compaction on every run while 822k
+# payloads (~241 MB) piled up. What the pass can cost is file growth, and
+# that is measured after every batch: ~2 MB a run at most.
+FILE_GROWTH_LIMIT_BYTES = 2 * 1_000_000
 # Stop if the tape's indexes have grown by more than this share of the payload
 # bytes freed: past that point the pass costs more space than it returns.
 NET_LOSS_RATIO = 0.5
@@ -81,14 +80,10 @@ NET_LOSS_MIN_BYTES = 1_000_000
 # Leaves room inside retention's 30-minute job for prune and cap defense.
 TIME_BUDGET_SECONDS = 12 * 60
 
-# The emergency pass (maintenance --compact-tape, token COMPACT-TAPE). Above
-# the 95% line retention's pass refuses, which on 2026-10-16 left 822k
-# payloads (~241 MB) unnulled with the file at the cap. The risk a pass poses
-# is extending the file, and that is measured after every batch, so the
-# emergency pass ignores the line and stops instead at 1 MB of file growth,
-# in small batches. Run by a human only.
+# The emergency pass (maintenance --compact-tape, token COMPACT-TAPE): the
+# same pass, tighter. Small batches, a 1 MB file-growth stop, a longer
+# budget. Run by a human only, when headroom is a few MB.
 EMERGENCY = {
-    "ignore_cap_line": True,
     "file_growth_limit": 1 * 1_000_000,
     "batch": 2_000,
     "time_budget": 25 * 60,
@@ -155,7 +150,6 @@ def plan_compaction(
 def compact_tape(
     engine: Engine, plan: CompactionPlan, now: Optional[dt.datetime] = None,
     _before_commit: Optional[Callable[[object], None]] = None,
-    ignore_cap_line: bool = False,
     file_growth_limit: Optional[int] = None,
     batch: Optional[int] = None,
     time_budget: Optional[int] = None,
@@ -183,9 +177,6 @@ def compact_tape(
             stopped = f"run cap: {MAX_ROWS_PER_RUN:,} rows nulled; the rest continues next run"
             break
         size = database_size_bytes(engine)
-        if not ignore_cap_line and size >= CAP_STOP_FRACTION * NEON_CAP_BYTES:
-            stopped = f"cap guard: database at {CAP_STOP_FRACTION:.0%} of the Neon cap"
-            break
         if size - file_start > growth_limit:
             stopped = (f"file grew {(size - file_start) / 1e6:.0f} MB during the pass; "
                        f"stopped so nulling cannot extend the file")
